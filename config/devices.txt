@@ -1,0 +1,17 @@
+# 设备列表文件
+# 格式: 设备名|IP|类型ID|用户名|密码|enable密码|端口|协议(可选)
+# Router1|192.168.1.1|1|admin|cisco|cisco|22|ssh
+# Switch1|192.168.1.2|1|admin|cisco|cisco|22|
+# AR1|192.168.1.10|0|admin|huawei||22|ssh
+# S5700|192.168.1.11|0|admin|huawei||22|
+# MX1|192.168.1.20|2|admin|juniper|juniper|22|ssh
+# OldSwitch|192.168.1.50|1|admin|oldpass|oldpass|23|telnet
+
+# SSH连接
+思科交换机1|192.168.139.251|1|cisco|cisco|cisco|22|ssh
+
+# Telnet连接
+思科交换机2|192.168.139.251|1|cisco|cisco|cisco|23|telnet
+
+# 使用默认协议(SSH)
+华为防火墙1|192.168.139.254|0|op|Nnteamu@20252|22

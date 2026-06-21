@@ -1,0 +1,9 @@
+# SDT设备巡检命令
+export PAGER=cat
+export TERM=dumb
+uname -a
+cat /etc/os-release
+df -h
+free -m
+ps aux | grep sdt
+netstat -tuln

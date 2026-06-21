@@ -1,0 +1,24 @@
+# 华为设备巡检命令
+# 系统信息
+display version
+display device
+display elabel
+
+# 接口状态
+display interface brief
+display ip interface brief
+
+# 路由信息
+display ip routing-table
+
+# ARP 表
+display arp all
+
+# 当前配置
+display current-configuration
+
+# LLDP 邻居
+display lldp neighbor-information
+
+# 环境状态
+display environment

@@ -1,0 +1,24 @@
+# Juniper 设备巡检命令
+# 系统信息
+show version
+show chassis hardware
+
+# 接口状态
+show interfaces terse
+show interfaces
+
+# 路由信息
+show route
+
+# ARP 表
+show arp
+
+# 当前配置
+show configuration
+
+# LLDP 邻居
+show lldp neighbors
+
+# 环境状态
+show chassis environment
+show chassis power

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell:*)",
+      "Bash(python:*)",
+      "Bash(claude mcp:*)",
+      "Skill(update-config)",
+      "Bash(curl:*)",
+      "Bash(chcp 65001)",
+      "Bash(pip install:*)"
+    ]
+  }
+}

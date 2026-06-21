@@ -1,0 +1,44 @@
+# Linux主机巡检命令配置文件
+# 系统基本信息
+uname -a
+hostname
+whoami
+pwd
+
+# 系统资源状态
+df -h
+free -h
+lscpu
+uptime
+
+# 网络状态
+ip addr show
+ip route show
+ss -tuln
+netstat -rn
+
+# 进程和服务状态
+ps aux --sort=-%cpu | head -20
+systemctl status
+systemctl list-failed
+
+# 磁盘和存储
+lsblk
+mount | grep -E '^/dev'
+iostat -x 1 1
+
+# 内存详情
+cat /proc/meminfo | head -20
+
+# 系统负载和CPU
+cat /proc/loadavg
+cat /proc/cpuinfo | grep "model name" | uniq
+
+# 网络连接详情
+ss -s
+
+# 日志检查（最近的系统错误）
+journalctl --priority=err --since="1 hour ago" --no-pager
+
+# 环境变量
+env | grep -E '^(PATH|HOME|USER|SHELL)'

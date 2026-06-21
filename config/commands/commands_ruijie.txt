@@ -1,0 +1,24 @@
+# 锐捷设备巡检命令
+# 系统信息
+show version
+show inventory
+
+# 接口状态
+show interfaces
+show interfaces status
+show ip interface brief
+
+# 路由信息
+show ip route
+
+# ARP 表
+show arp
+
+# 当前配置
+show running-config
+
+# LLDP 邻居
+show lldp neighbors
+
+# 环境状态
+show environment

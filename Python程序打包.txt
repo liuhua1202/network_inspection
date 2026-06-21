@@ -1,0 +1,84 @@
+安装 PyInstaller
+在已安装 Python 和所有依赖（如 netmiko）的环境中执行：
+
+bash
+pip install pyinstaller
+2. 准备打包环境
+确保你的项目目录包含以下文件：
+
+plaintext
+network_inspection/
+├── network_inspection.py  # 主脚本
+├── devices.txt            # 设备列表
+├── commands_cisco.txt     # 思科设备命令
+├── commands_huawei.txt    # 华为设备命令
+└── ...                    # 其他设备类型的命令文件
+3. 创建打包配置文件（推荐）
+在项目目录下创建 network_inspection.spec 文件，内容如下：
+
+python
+运行
+# network_inspection.spec
+# 用于打包网络巡检脚本的配置文件
+
+block_cipher = None
+
+a = Analysis(
+    ['network_inspection.py'],  # 主脚本
+    pathex=[],
+    binaries=[],
+    datas=[
+        ('devices.txt', '.'),  # 包含设备列表
+        ('commands_*.txt', '.'),  # 包含所有命令文件
+    ],
+    hiddenimports=[],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='NetworkInspection',  # 生成的可执行文件名
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,  # 使用UPX压缩（需额外安装）
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,  # 显示控制台窗口
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None
+)
+4. 执行打包命令
+在命令行中执行：
+
+# 使用配置文件打包
+bash
+pyinstaller --clean network_inspection.spec
+
+# 基础打包（生成单个exe文件，可能启动较慢）
+pyinstaller -F -i favicon.ico network_inspection.py
+
+# 或生成文件夹形式（启动较快，包含所有依赖）
+pyinstaller -D  -i favicon.ico network_inspection.py
+
+# 通过 Python 运行 PyInstaller 模块
+python -m PyInstaller -F -i favicon.ico network_inspection.py
+
+pyinstaller --onefile --icon=favicon.ico --noconsole .\network_inspection_v1.0.0.py 
+

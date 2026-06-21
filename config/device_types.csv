@@ -1,0 +1,8 @@
+# 设备类型配置文件,,,,,,,
+# 格式: 类型ID,名称,Netmiko SSH类型,Netmiko Telnet类型,是否需要enable(1/0),禁用分页命令,默认协议,命令文件路径
+0,华为设备,huawei,huawei_telnet,0,screen-length 0 temporary,ssh,commands/commands_huawei.txt
+1,思科设备,cisco_ios,cisco_ios_telnet,1,terminal length 0,ssh,commands/commands_cisco.txt
+2,Juniper设备,juniper_junos,juniper_junos_telnet,0,set cli screen-length 0,ssh,commands/commands_juniper.txt
+3,H3C设备,hp_comware,hp_comware_telnet,0,screen-length disable,ssh,commands/commands_h3c.txt
+4,锐捷设备,ruijie_os,ruijie_os_telnet,1,terminal length 0,ssh,commands/commands_ruijie.txt
+5,Linux设备,linux,linux,0,,ssh,commands/commands_linux.txt
