@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Runtime artifacts - 巡检产物
+InspectionLogs/
+*.log
+
+# 测试中临时生成
+config/devices - 副本.csv
+__enc_test__.py
+__replace_method__.py
+__check__.py
+
+# 系统
+Thumbs.db
+desktop.ini

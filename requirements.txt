@@ -1,0 +1,13 @@
+# 网络设备巡检工具 - 依赖清单
+# 安装：pip install -r requirements.txt
+
+# 核心：SSH/Telnet 连接设备
+netmiko>=4.0.0
+
+# 可选：导出结果为 Excel（不装也能跑，仅"导出结果/统计报告"按钮失效）
+pandas>=1.3.0
+openpyxl>=3.0.0
+
+# Tkinter 通常随 Python 一起安装：
+#   Windows / macOS：python.org 安装包自带
+#   Linux：sudo apt install python3-tk（Debian/Ubuntu）

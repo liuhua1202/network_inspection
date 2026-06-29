@@ -14,7 +14,8 @@ display ip routing-table
 # ARP 表
 display arp all
 
-# 当前配置
+# 当前配置（重型命令：单独 180s 超时）
+# @heavy
 display current-configuration
 
 # LLDP 邻居

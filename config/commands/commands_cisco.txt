@@ -14,7 +14,8 @@ show ip route
 # ARP 表
 show arp
 
-# 当前配置
+# 当前配置（重型命令：单独 180s 超时）
+# @heavy
 show running-config
 
 # CDP 邻居

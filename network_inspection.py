@@ -27,6 +27,16 @@ except ImportError as e:
     NETMIKO_AVAILABLE = False
     missing_netmiko_message = str(e)
 
+# 可选的导出依赖：pandas + openpyxl，缺失仅影响"导出结果/统计报告"
+try:
+    import pandas as _pd_check
+    import openpyxl as _openpyxl_check
+    PANDAS_AVAILABLE = True
+    missing_pandas_message = ''
+except ImportError as e:
+    PANDAS_AVAILABLE = False
+    missing_pandas_message = str(e)
+
 # 导入字体和样式库
 try:
     from tkinter import font
@@ -134,6 +144,9 @@ CORNER_RADIUS = 8
 # 阴影（通过边框模拟）
 SHADOW_COLOR = "rgba(0, 0, 0, 0.1)"
 
+# 连通性测试单设备超时（秒）。5 秒无响应即判定超时，不再重试。
+CONNECTIVITY_TIMEOUT_SECONDS = 5
+
 # ==================== 日志目录 ====================
 LOG_DIR_NAME = "InspectionLogs"
 LOG_SUBDIR_NAME = "logs"
@@ -161,6 +174,10 @@ elif os.path.exists(os.path.join(CONFIG_DIR, 'devices.txt')):
 stop_event = threading.Event()  # 线程安全的停止信号
 _inspection_lock = threading.Lock()
 _encoding_cache = {}  # 文件编码缓存，避免重复检测
+
+# 日志级别前缀识别（行首 [LEVEL] 形式）
+import re as _re_log_level
+_LOG_LEVEL_PREFIX_RE = _re_log_level.compile(r'^\[(DEBUG|INFO|WARNING|ERROR|SUCCESS|CRITICAL)\]')
 
 # ==================== 工具函数 ====================
 def setup_logging():
@@ -273,177 +290,6 @@ def sanitize_filename(filename: str) -> str:
     """清理文件名，移除非法字符"""
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
-def validate_device_config(device: dict) -> list:
-    """验证设备配置，返回错误列表"""
-    errors = []
-    
-    if not device.get('device_name', '').strip():
-        errors.append("设备名称不能为空")
-    
-    if not device.get('ip', '').strip():
-        errors.append("IP地址不能为空")
-    elif not validate_ip(device['ip']):
-        errors.append(f"IP地址格式错误：{device['ip']}")
-    
-    port = device.get('port', 22)
-    if not validate_port(port):
-        errors.append(f"端口号无效：{port}")
-    
-    protocol = device.get('protocol', '')
-    if protocol and protocol not in ['ssh', 'telnet']:
-        errors.append(f"协议无效：{protocol}")
-    
-    return errors
-
-
-def encrypt_password(password: str, key: bytes = None) -> str:
-    """加密密码（简单Base64编码，生产环境建议使用cryptography库）"""
-    import base64
-    if not password:
-        return ""
-    # 使用Base64编码作为简单加密（可选：使用cryptography.fernet进行真正加密）
-    encoded = base64.b64encode(password.encode('utf-8')).decode('utf-8')
-    return f"ENC:{encoded}"
-
-def decrypt_password(encrypted: str, key: bytes = None) -> str:
-    """解密密码"""
-    import base64
-    if not encrypted or not encrypted.startswith("ENC:"):
-        return encrypted  # 未加密的密码直接返回
-    try:
-        encoded = encrypted[4:]  # 移除"ENC:"前缀
-        decoded = base64.b64decode(encoded.encode('utf-8')).decode('utf-8')
-        return decoded
-    except Exception as e:
-        debug_log(f"密码解密失败：{e}")
-        return encrypted
-
-def is_password_encrypted(value: str) -> bool:
-    """判断密码是否已加密"""
-    return value.startswith("ENC:") if value else False
-
-
-# ==================== 命令白名单验证 ====================
-# 常见网络设备安全命令白名单
-SAFE_COMMAND_PATTERNS = {
-    'huawei': [
-        r'^display\s+.*',           # display命令
-        r'^show\s+.*',              # show命令
-        r'^screen-length\s+0.*',    # 分页控制
-    ],
-    'cisco_ios': [
-        r'^show\s+.*',
-        r'^terminal\s+length\s+0.*',
-    ],
-    'hp_comware': [
-        r'^display\s+.*',
-        r'^screen-length\s+0.*',
-    ],
-    'juniper_junos': [
-        r'^show\s+.*',
-        r'^display\s+.*',
-    ],
-    'ruijie_os': [
-        r'^show\s+.*',
-        r'^display\s+.*',
-    ],
-    'linux': [
-        r'^cat\s+/etc/.*',
-        r'^uname\s+-.*',
-        r'^ifconfig.*',
-        r'^ip\s+.*',
-        r'^df\s+-.*',
-        r'^free\s+-.*',
-    ],
-}
-
-def validate_command(device_type_id: str, command: str) -> bool:
-    """验证命令是否在白名单中"""
-    patterns = SAFE_COMMAND_PATTERNS.get(device_type_id, [])
-    for pattern in patterns:
-        if re.match(pattern, command, re.IGNORECASE):
-            return True
-    return False
-
-def validate_commands_for_device(device_type_id: str, commands: list) -> list:
-    """过滤不安全命令，返回有效命令列表"""
-    valid_commands = []
-    for cmd in commands:
-        if validate_command(device_type_id, cmd):
-            valid_commands.append(cmd)
-        else:
-            LOG_QUEUE.put(f"警告：命令 '{cmd}' 不在白名单中，已跳过")
-            debug_log(f"命令白名单过滤：{cmd}")
-    return valid_commands
-
-
-# ==================== 数据模型 ====================
-from dataclasses import dataclass
-from typing import Dict, List, Optional
-
-@dataclass
-class DeviceTypeModel:
-    """设备类型数据模型"""
-    type_id: str
-    name: str
-    ssh_driver: str
-    telnet_driver: str
-    enable_mode: bool
-    disable_paging_cmd: str
-    default_protocol: str
-    commands_file: str = ""
-    
-    @property
-    def netmiko_type(self) -> Dict[str, str]:
-        """获取Netmiko驱动映射"""
-        return {
-            'ssh': self.ssh_driver,
-            'telnet': self.telnet_driver
-        }
-    
-    @classmethod
-    def from_dict(cls, type_id: str, config: dict) -> 'DeviceTypeModel':
-        """从字典创建实例"""
-        return cls(
-            type_id=type_id,
-            name=config.get('name', ''),
-            ssh_driver=config['netmiko_type']['ssh'],
-            telnet_driver=config['netmiko_type']['telnet'],
-            enable_mode=config.get('enable_mode', False),
-            disable_paging_cmd=config.get('disable_paging_cmd', ''),
-            default_protocol=config.get('default_protocol', 'ssh'),
-            commands_file=config.get('commands_file', '')
-        )
-
-@dataclass
-class DeviceModel:
-    """设备数据模型"""
-    device_name: str
-    ip: str
-    device_type: str
-    username: str = ""
-    password: str = ""
-    secret: str = ""
-    port: int = 22
-    protocol: Optional[str] = None
-    encoding: Optional[str] = None
-    selected: bool = True
-    
-    def to_connection_dict(self, device_type: DeviceTypeModel) -> Dict:
-        """转换为Netmiko连接参数字典"""
-        protocol = self.protocol or device_type.default_protocol
-        return {
-            'device_type': device_type.netmiko_type[protocol],
-            'ip': self.ip,
-            'port': self.port,
-            'username': self.username or None,
-            'password': self.password or None,
-            'secret': self.secret or None,
-            'timeout': 60,
-            'global_delay_factor': 2,
-            'read_timeout_override': 120,
-        }
-
 
 # ==================== 现代风格组件 ====================
 class ModernButton(tk.Button):
@@ -467,6 +313,15 @@ class ModernButton(tk.Button):
 
         # 设置初始样式
         self._apply_style()
+
+        # 自注册到根 UI 的按钮列表，便于主题切换时统一刷新
+        try:
+            root = parent.winfo_toplevel()
+            if hasattr(root, '_modern_buttons') and isinstance(root._modern_buttons, list):
+                if self not in root._modern_buttons:
+                    root._modern_buttons.append(self)
+        except Exception:
+            pass
 
         # 绑定事件
         self.bind('<Button-1>', self._on_button_click)
@@ -619,27 +474,6 @@ class ModernButton(tk.Button):
         """动态设置按钮变体"""
         self.variant = variant
         self._apply_style()
-
-
-class ModernCard(Frame):
-    """现代化卡片容器"""
-
-    def __init__(self, parent, bg=theme_manager.get_color('BG_CARD'), relief='flat', borderwidth=1, **kwargs):
-        super().__init__(parent, bg=bg, relief=relief, borderwidth=borderwidth, **kwargs)
-
-        # 添加阴影效果（通过边框）
-        self.shadow_top = Frame(self, height=1, bg='#ffffff')
-        self.shadow_left = Frame(self, width=1, bg='#ffffff')
-        self.shadow_bottom = Frame(self, height=1, bg='#e0e0e0')
-        self.shadow_right = Frame(self, width=1, bg='#e0e0e0')
-
-
-class ModernHeader(Label):
-    """现代化标题"""
-
-    def __init__(self, parent, text, font_size=14, weight='bold', color=theme_manager.get_color('FG_PRIMARY'), **kwargs):
-        font = (FONT_FAMILY_UI, font_size, weight)
-        super().__init__(parent, text=text, font=font, fg=color, bg=parent.cget('bg'), **kwargs)
 
 
 class ModernEntry(tk.Entry):
@@ -804,6 +638,9 @@ class ModernNetworkInspectionUI:
         self.search_var = None
         self.search_entry = None
         self._search_timer = None
+
+        # 主题切换需要：所有 ModernButton 实例列表 + 主题切换回调钩子
+        self._modern_buttons = []
         
         # 统计信息
         self.completed_count = 0
@@ -1291,6 +1128,9 @@ class ModernNetworkInspectionUI:
                                               values=log_level_options, state="readonly", width=8,
                                               font=(FONT_FAMILY_UI, 11))
         self.log_level_combobox.pack(side='left')
+        # 初始化显示级别，并绑定下拉框变化
+        self.min_log_level = self.log_level_var.get()
+        self.log_level_combobox.bind('<<ComboboxSelected>>', self._on_log_level_changed)
 
     def create_status_bar(self, parent):
         """创建状态栏"""
@@ -1312,8 +1152,8 @@ class ModernNetworkInspectionUI:
         # 详细进度条
         self.progress_var = tk.IntVar(value=0)
         self.progress_bar = DetailedProgressbar(inner_frame)
+        # 注意：使用 fill='x', expand=True 拉伸，不要再设 length，否则冲突
         self.progress_bar.pack(side='left', padx=(24, 0), fill='x', expand=True)
-        self.progress_bar.progress_bar.config(length=300)
 
         # 状态指示器
         self.status_indicator = Label(inner_frame, text="●",
@@ -1362,47 +1202,64 @@ class ModernNetworkInspectionUI:
             self.root.after(0, lambda: self.status_var.set(f"加载配置失败：{str(e)}"))
 
     def auto_load_default_configs(self):
-        """自动加载默认配置"""
+        """自动加载默认配置 - 在工作线程中仅做数据加载，UI 变更派发到主线程"""
+        # 收集本次加载结果
         success = True
+        device_types_loaded = {}
+        devices_loaded = []
+        device_types_file_loaded = ''
+        devices_file_loaded = ''
 
         # 加载设备类型 - 使用 GBK 优先编码
         if DEFAULT_DEVICE_TYPES_FILE and os.path.exists(DEFAULT_DEVICE_TYPES_FILE):
-            self.device_types = load_device_types_config(DEFAULT_DEVICE_TYPES_FILE, self.encodings_config)
-            self.device_types_file = DEFAULT_DEVICE_TYPES_FILE
+            device_types_loaded = load_device_types_config(DEFAULT_DEVICE_TYPES_FILE, self.encodings_config)
+            device_types_file_loaded = DEFAULT_DEVICE_TYPES_FILE
         else:
             LOG_QUEUE.put("未找到默认设备类型配置文件")
             success = False
 
         # 加载设备列表 - 使用 GBK 优先编码
         if DEFAULT_DEVICES_FILE and os.path.exists(DEFAULT_DEVICES_FILE):
-            self.devices = load_devices(DEFAULT_DEVICES_FILE, self.encodings_config)
-            self.original_devices = self.devices.copy()
-            self.devices_file = DEFAULT_DEVICES_FILE
+            devices_loaded = load_devices(DEFAULT_DEVICES_FILE, self.encodings_config)
+            devices_file_loaded = DEFAULT_DEVICES_FILE
         else:
             LOG_QUEUE.put("未找到默认设备列表配置文件")
             success = False
 
-        # 关联命令文件
+        # 把数据写回到实例（仅写数据字段；UI 由主线程做）
+        self.device_types = device_types_loaded
+        self.devices = devices_loaded
+        self.original_devices = list(devices_loaded)
+        self.device_types_file = device_types_file_loaded
+        self.devices_file = devices_file_loaded
+
+        # 命令关联涉及 IO（在前台 IO 仍属工作线程可做范围；不要触碰 widget）
         self.auto_associate_commands_from_device_types()
 
-        # 更新显示
-        self.update_config_file_display()
-        self.update_device_listbox()
-        self.update_commands_listbox()
+        # 把所有 UI 更新派发到主线程
+        self.root.after(0, self._apply_loaded_config_ui, success)
 
-        # 验证配置
-        valid_device_types = validate_device_types_config(self.device_types)
-        valid_devices = validate_devices_config(self.devices, self.device_types) if self.devices else False
-        valid_commands = validate_commands_config(self.device_types, self.command_files)
+    def _apply_loaded_config_ui(self, success):
+        """把已加载配置应用到 UI —— 必须在 Tk 主线程中调用"""
+        try:
+            self.update_config_file_display()
+            self.update_device_listbox()
+            self.update_commands_listbox()
+            self.update_start_button_state()
 
-        self.update_start_button_state()
+            valid_device_types = validate_device_types_config(self.device_types)
+            valid_devices = validate_devices_config(self.devices, self.device_types) if self.devices else False
+            valid_commands = validate_commands_config(self.device_types, self.command_files)
 
-        if success and valid_device_types and valid_devices and valid_commands:
-            self.status_var.set("所有配置加载完成，可以开始巡检")
-            self.update_status_indicator('success')
-        else:
-            self.status_var.set("部分配置缺失，请检查日志")
-            self.update_status_indicator('warning')
+            if success and valid_device_types and valid_devices and valid_commands:
+                self.status_var.set("所有配置加载完成，可以开始巡检")
+                self.update_status_indicator('success')
+            else:
+                self.status_var.set("部分配置缺失，请检查日志")
+                self.update_status_indicator('warning')
+        except Exception as e:
+            debug_log(f"应用加载配置到 UI 失败：{e}")
+            log_error(f"应用加载配置到 UI 失败：{e}")
 
     def auto_associate_commands_from_device_types(self):
         """从设备类型配置中自动关联命令文件"""
@@ -1675,12 +1532,8 @@ class ModernNetworkInspectionUI:
                 msg = LOG_QUEUE.get_nowait()  # 非阻塞获取
                 timestamp = datetime.now().strftime('%H:%M:%S')
 
-                # 解析日志级别
-                level = 'INFO'
-                for lvl in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS', 'CRITICAL']:
-                    if f'[{lvl}]' in msg or lvl in msg:
-                        level = lvl
-                        break
+                # 使用更精确的级别识别（避免子串误匹配）
+                level = self._detect_log_level(msg)
 
                 # 应用日志级别过滤
                 if not self._should_show_log_level(level):
@@ -1714,12 +1567,36 @@ class ModernNetworkInspectionUI:
         self.root.after(100, self.update_log)  # 提高响应性到100ms
 
     def _should_show_log_level(self, level):
-        """判断是否应显示指定日志级别"""
-        # 默认显示所有级别，可根据需要实现过滤逻辑
-        # 例如，只显示INFO及以上级别的日志
+        """判断是否应显示指定日志级别（基于下拉框选中的最低级别）"""
         log_level_priority = {'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4, 'SUCCESS': 1}
-        min_level = getattr(self, 'min_log_level', 'DEBUG')  # 可通过配置设置最低显示级别
+        min_level = getattr(self, 'min_log_level', 'DEBUG')
         return log_level_priority.get(level, 1) >= log_level_priority.get(min_level, 0)
+
+    def _on_log_level_changed(self, event=None):
+        """日志级别下拉框变更回调"""
+        self.min_log_level = self.log_level_var.get()
+        LOG_QUEUE.put(f"日志显示级别已更新为：{self.min_log_level}")
+
+    def _detect_log_level(self, msg):
+        """从日志文本中识别级别。
+        优先匹配 `[LEVEL]` 前缀；否则按中文/英文关键字启发式判断；最后兜底为 INFO。
+        """
+        if not isinstance(msg, str):
+            return 'INFO'
+        m = _LOG_LEVEL_PREFIX_RE.match(msg)
+        if m:
+            return m.group(1)
+        lower = msg.lower()
+        # 关键字启发式（避免子串误匹配：例如 "information" 不应被识别成 INFO）
+        if '失败' in msg or '错误' in msg or '异常' in msg or 'error' in lower or 'failed' in lower or 'exception' in lower:
+            return 'ERROR'
+        if '警告' in msg or 'warn' in lower:
+            return 'WARNING'
+        if '成功' in msg or 'success' in lower:
+            return 'SUCCESS'
+        if '调试' in msg or 'debug' in lower:
+            return 'DEBUG'
+        return 'INFO'
 
     def _limit_log_lines(self, max_lines=5000):
         """限制日志行数，防止内存泄漏"""
@@ -1798,17 +1675,107 @@ class ModernNetworkInspectionUI:
         messagebox.showinfo("关于软件", about_text)
 
     def toggle_high_contrast(self):
-        """切换高对比度模式"""
+        """切换高对比度模式 —— 真正遍历 widget 树并刷新颜色"""
         is_high_contrast = theme_manager.toggle_high_contrast()
         status = "已开启" if is_high_contrast else "已关闭"
         LOG_QUEUE.put(f"高对比度模式{status}")
         self.status_var.set(f"高对比度模式{status}")
-        
-        # 可以在这里添加重新绘制UI的逻辑，如果需要的话
-        # 目前依赖于动态颜色获取，无需手动重绘
+
+        # 1) 重新配置 ttk 样式（Treeview/Progressbar/Scrollbar/Combobox 等）
+        self._reapply_ttk_styles()
+        # 2) 递归给所有 Tk widget 重新着色
+        self._reapply_theme_recursive(self.root)
+        # 3) 刷新所有 ModernButton 样式
+        for btn in getattr(self, '_modern_buttons', []):
+            try:
+                btn._apply_style()
+            except Exception:
+                pass
+
+    def _reapply_ttk_styles(self):
+        """重新配置受主题色影响的 ttk 样式"""
+        try:
+            style = ttk.Style()
+            style.theme_use('clam')
+            style.configure('DeviceTree.Treeview',
+                            background=theme_manager.get_color('BG_CARD'),
+                            foreground=theme_manager.get_color('FG_PRIMARY'),
+                            fieldbackground=theme_manager.get_color('BG_CARD'),
+                            rowheight=36,
+                            font=(FONT_FAMILY_UI, 10),
+                            borderwidth=0,
+                            relief='flat',
+                            padding=(0, 4, 0, 4))
+            style.configure('DeviceTree.Treeview.Heading',
+                            background=theme_manager.get_color('BG_SECONDARY'),
+                            foreground=theme_manager.get_color('FG_PRIMARY'),
+                            font=(FONT_FAMILY_UI, 10, 'bold'),
+                            relief='flat',
+                            padding=(10, 8, 10, 8))
+            style.map('DeviceTree.Treeview',
+                      background=[('selected', theme_manager.get_color('ACCENT'))],
+                      foreground=[('selected', '#ffffff')])
+            style.configure('Treeview',
+                            borderwidth=1,
+                            focusthickness=1,
+                            focuscolor=theme_manager.get_color('ACCENT'))
+            style.configure('Modern.Horizontal.TProgressbar',
+                            troughcolor=theme_manager.get_color('BG_DARK'),
+                            background=theme_manager.get_color('ACCENT'),
+                            borderwidth=0,
+                            lightcolor=theme_manager.get_color('ACCENT_LIGHT'),
+                            darkcolor=theme_manager.get_color('ACCENT_DARK'))
+            style.configure('Vertical.TScrollbar',
+                            gripcount=0,
+                            troughcolor=theme_manager.get_color('BG_DARK'),
+                            background=theme_manager.get_color('ACCENT_LIGHT'),
+                            arrowcolor=theme_manager.get_color('FG_MUTED'),
+                            bordercolor=theme_manager.get_color('BG_DARK'),
+                            lightcolor=theme_manager.get_color('BG_DARK'),
+                            darkcolor=theme_manager.get_color('BG_DARK'))
+        except Exception as e:
+            debug_log(f"刷新 ttk 样式失败：{e}")
+
+    def _reapply_theme_recursive(self, widget):
+        """递归给 Tk 控件应用当前主题色（仅对 bg/fg 安全更新）"""
+        # 避免在 ModernButton 上重复设置（其内部已处理）
+        if isinstance(widget, ModernButton):
+            try:
+                widget._apply_style()
+            except Exception:
+                pass
+        else:
+            cls_name = ''
+            try:
+                cls_name = widget.winfo_class()
+            except Exception:
+                cls_name = ''
+
+            try:
+                if cls_name in ('Frame', 'Toplevel'):
+                    widget.configure(bg=theme_manager.get_color('BG_PRIMARY'))
+                elif cls_name == 'Label':
+                    # 标题/状态文字用 FG_PRIMARY；其它保持原 fg，仅统一背景
+                    widget.configure(bg=theme_manager.get_color('BG_PRIMARY'))
+                elif cls_name == 'Text':
+                    widget.configure(
+                        bg=theme_manager.get_color('BG_CARD'),
+                        fg=theme_manager.get_color('FG_PRIMARY'),
+                        insertbackground=theme_manager.get_color('ACCENT'),
+                        selectbackground=theme_manager.get_color('ACCENT'),
+                    )
+            except Exception:
+                pass
+
+        for child in widget.winfo_children():
+            self._reapply_theme_recursive(child)
 
     def export_results(self):
         """导出巡检结果"""
+        if not PANDAS_AVAILABLE:
+            messagebox.showerror("错误", f"导出功能需要安装 pandas 与 openpyxl：\npip install pandas openpyxl\n\n原因：{missing_pandas_message}")
+            return
+
         # 检查是否有结果可以导出
         if not hasattr(self, 'inspection_results') or not self.inspection_results:
             messagebox.showwarning("警告", "没有巡检结果可以导出")
@@ -1871,32 +1838,66 @@ class ModernNetworkInspectionUI:
             messagebox.showerror("错误", f"导出巡检结果失败：{str(e)}")
 
     def generate_statistics_report(self):
-        """生成统计报告"""
+        """生成统计报告（基于真实结果数据）"""
+        # 启动期依赖检查
+        if not PANDAS_AVAILABLE:
+            messagebox.showerror("错误", f"统计报告功能需要安装 pandas 与 openpyxl：\npip install pandas openpyxl\n\n原因：{missing_pandas_message}")
+            return
+
+        # 没有真实数据时不要硬出报告
+        results = getattr(self, 'inspection_results', []) or []
+        if not results:
+            if not messagebox.askyesno(
+                "无巡检数据",
+                "当前尚未执行过巡检，将生成一份空统计报告。是否继续？"
+            ):
+                return
+
         try:
             import pandas as pd
             from datetime import datetime
 
-            # 计算统计信息
+            # 计算统计信息（基于真实 inspection_results，而非字符串 hack）
             total_devices = len(self.devices) if hasattr(self, 'devices') else 0
             selected_devices = len([d for d in self.devices if d.get('selected', True)]) if hasattr(self, 'devices') else 0
-            
+
+            results = getattr(self, 'inspection_results', []) or []
+            completed = len(results)
+            success_count = sum(1 for r in results if r.get('status') == 'success')
+            failed_count = sum(1 for r in results if r.get('status') == 'failed')
+            interrupted_count = sum(1 for r in results if r.get('status') == 'interrupted')
+            durations = [r.get('duration', 0) for r in results if r.get('duration', 0) > 0]
+            avg_duration = (sum(durations) / len(durations)) if durations else 0
+            total_duration = sum(durations)
+            success_rate = (success_count / selected_devices * 100) if selected_devices > 0 else 0
+
+            latest_time = max((r.get('end_time') for r in results if r.get('end_time')), default='')
+
             # 生成报告
             stats_data = {
                 '统计项目': [
                     '总设备数',
                     '选中设备数',
                     '巡检完成数',
+                    '成功数',
+                    '失败数',
+                    '中断数',
                     '巡检成功率',
                     '平均响应时间(秒)',
+                    '总耗时(秒)',
                     '最新巡检时间'
                 ],
                 '数值': [
                     total_devices,
                     selected_devices,
-                    getattr(self, 'completed_count', 0),
-                    f"{getattr(self, 'success_rate', 0):.2f}%",
-                    f"{getattr(self, 'avg_response_time', 0):.2f}",
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    completed,
+                    success_count,
+                    failed_count,
+                    interrupted_count,
+                    f"{success_rate:.2f}%",
+                    f"{avg_duration:.2f}",
+                    f"{total_duration:.2f}",
+                    latest_time or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 ]
             }
 
@@ -2015,9 +2016,8 @@ class ModernNetworkInspectionUI:
         if ext.lower() not in ['.csv', '.txt']:
             messagebox.showwarning("警告", f"不推荐的文件格式：{ext}，建议使用 .csv 或 .txt 文件")
 
-        # 验证配置文件格式
-        required_columns = ['device_name', 'ip', 'device_type']
-        is_valid, validation_errors = validate_config_file(file_path, required_columns)
+        # 验证配置文件格式（按位置校验前 3 列：设备名/IP/类型，不再要求英文列名）
+        is_valid, validation_errors = validate_config_file(file_path, 3)
         if not is_valid:
             error_msg = "配置文件格式错误：\n" + "\n".join(validation_errors)
             messagebox.showerror("错误", error_msg)
@@ -2162,13 +2162,17 @@ class ModernNetworkInspectionUI:
         selected_encoding = self.encoding_var.get()
         if selected_encoding == "自动检测":
             selected_encodings = self.encodings
-            LOG_QUEUE.put("使用自动编码检测模式")
+            # 自动检测默认走 GBK（项目中文环境、devices.csv 为 GBK）；
+            # 现代设备若是 UTF-8，请在 devices.csv 第 9 列或下拉框显式指定
+            default_encoding = 'gbk'
+            LOG_QUEUE.put("使用自动编码检测模式（默认 GBK；可在下拉框或 devices.csv 第 9 列覆盖）")
         else:
             encoding_map = {"UTF-8": "utf-8", "GBK": "gbk", "GB2312": "gb2312",
                           "GB18030": "gb18030", "Big5": "big5"}
-            primary = encoding_map.get(selected_encoding, "utf-8")
+            primary = encoding_map.get(selected_encoding, "gbk")
             selected_encodings = [primary] + [e for e in self.encodings if e != primary]
-            LOG_QUEUE.put(f"优先使用编码：{selected_encoding}")
+            default_encoding = primary
+            LOG_QUEUE.put(f"使用编码：{selected_encoding}（可在 devices.csv 第 9 列覆盖）")
 
         self.inspection_running = True
         self.start_btn.config(state='disabled')
@@ -2176,14 +2180,24 @@ class ModernNetworkInspectionUI:
         self.update_status_indicator('running')
 
         self.status_var.set("开始巡检...")
-        self.progress_var.set(0)
+        # 详细进度条重置（同时清掉内部 IntVar）
+        if hasattr(self.progress_bar, 'set_progress'):
+            self.progress_bar.set_progress(0, "准备开始...")
+        else:
+            self.progress_var.set(0)
+        # 重置本次巡检结果收集器
+        self.inspection_results = []
         debug_log("开始巡检")
 
-        # 启动工作线程
+        # 启动工作线程 - 传入 self.progress_bar (DetailedProgressbar) 而非 IntVar
+        # 以便 worker 走 set_progress 分支显示详细文本
+        # 注意：max_workers 必须用 kwargs 传，否则会被位置参数绑定到 default_encoding 导致 TypeError
         threading.Thread(
             target=inspection_worker,
             args=(self.devices, self.device_types, self.command_files,
-                  selected_encodings, self.status_var, self.progress_var, max_workers),
+                  selected_encodings, self.status_var, self.progress_bar,
+                  self.inspection_results),
+            kwargs={'default_encoding': default_encoding, 'max_workers': max_workers},
             daemon=True
         ).start()
 
@@ -2201,7 +2215,7 @@ class ModernNetworkInspectionUI:
             self.stop_btn.config(state='disabled')
 
     def test_device_connectivity(self):
-        """测试设备连通性"""
+        """测试设备连通性（手动开始、可中途停止、结果实时显示）"""
         if not NETMIKO_AVAILABLE:
             messagebox.showerror("错误", "缺少依赖库 netmiko，无法执行连通性测试。请运行：pip install netmiko")
             return
@@ -2211,145 +2225,446 @@ class ModernNetworkInspectionUI:
             messagebox.showwarning("警告", "请至少选择一台设备进行连通性测试")
             return
 
-        # 获取选中的设备
         selected_devices = [d for d in self.devices if d.get('selected', True)]
+        if not selected_devices:
+            messagebox.showwarning("警告", "所选设备列表为空，无法测试")
+            return
 
-        # 创建进度对话框
+        # 局部停止事件（不污染全局 stop_event，避免影响主巡检）
+        test_stop_event = threading.Event()
+
         progress_dialog = tk.Toplevel(self.root)
         progress_dialog.title("设备连通性测试")
-        progress_dialog.geometry("500x300")
+        progress_dialog.geometry("720x520")
         progress_dialog.transient(self.root)
         progress_dialog.grab_set()
 
-        # 进度标签
-        progress_label = Label(progress_dialog, text="开始测试设备连通性...", font=(FONT_FAMILY_UI, 11))
-        progress_label.pack(pady=20)
+        def on_dialog_close():
+            test_stop_event.set()
+            try:
+                progress_dialog.grab_release()
+            except Exception:
+                pass
+            progress_dialog.destroy()
+        progress_dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
 
-        # 进度条
-        progress_bar = ttk.Progressbar(progress_dialog, mode='determinate')
-        progress_bar.pack(fill='x', padx=20, pady=10)
-        progress_bar['maximum'] = len(selected_devices)
+        # 顶部
+        header = Frame(progress_dialog, bg=progress_dialog.cget('bg'))
+        header.pack(fill='x', padx=16, pady=(12, 4))
+        Label(header,
+              text=f"将测试 {len(selected_devices)} 台设备的连通性",
+              font=(FONT_FAMILY_UI, 12, 'bold'),
+              fg=theme_manager.get_color('FG_PRIMARY'),
+              bg=progress_dialog.cget('bg')).pack(side='left')
 
-        # 结果显示区域
-        result_text = Text(progress_dialog, wrap='word', state='normal',
-                          font=(FONT_FAMILY_CODE, 10), height=10)
-        scrollbar = ttk.Scrollbar(result_text)
-        result_text.config(yscrollcommand=scrollbar.set)
-        scrollbar.config(command=result_text.yview)
+        # 进度区
+        progress_frame = Frame(progress_dialog, bg=progress_dialog.cget('bg'))
+        progress_frame.pack(fill='x', padx=16, pady=(4, 4))
+        progress_label = Label(progress_frame, text="等待开始...",
+                               font=(FONT_FAMILY_UI, 11),
+                               fg=theme_manager.get_color('FG_SECONDARY'),
+                               bg=progress_dialog.cget('bg'))
+        progress_label.pack(anchor='w')
+        progress_bar = ttk.Progressbar(progress_frame, mode='determinate',
+                                       maximum=len(selected_devices))
+        progress_bar.pack(fill='x', pady=(4, 0))
 
-        result_text.pack(fill='both', expand=True, padx=20, pady=10)
+        # 主操作工具栏：开始 / 停止（放在详情上方，最显眼）
+        action_bar = Frame(progress_dialog, bg=progress_dialog.cget('bg'))
+        action_bar.pack(fill='x', padx=16, pady=(8, 4))
+
+        Label(action_bar, text="操作：",
+              font=(FONT_FAMILY_UI, 10, 'bold'),
+              fg=theme_manager.get_color('FG_PRIMARY'),
+              bg=progress_dialog.cget('bg')).pack(side='left', padx=(0, 8))
+
+        def _btn(parent, text, width, variant):
+            return ModernButton(parent, text, width=width, height=34, variant=variant)
+
+        action_btn_frame = Frame(action_bar, bg=progress_dialog.cget('bg'))
+        action_btn_frame.pack(side='left')
+
+        start_btn = _btn(action_btn_frame, "▶ 开始测试", 130, 'primary')
+        stop_btn  = _btn(action_btn_frame, "⏹ 停止",     100, 'danger')
+
+        start_btn.pack(side='left', padx=(0, 8))
+        stop_btn.pack(side='left')
+
+        stop_btn.disable()
+
+        # 结果区
+        result_frame = Frame(progress_dialog, bg=progress_dialog.cget('bg'))
+        result_frame.pack(fill='both', expand=True, padx=16, pady=(4, 4))
+        Label(result_frame, text="执行详情（实时）：",
+              font=(FONT_FAMILY_UI, 10, 'bold'),
+              fg=theme_manager.get_color('FG_PRIMARY'),
+              bg=progress_dialog.cget('bg')).pack(anchor='w')
+        result_text = Text(result_frame, wrap='word', font=(FONT_FAMILY_CODE, 10),
+                           bg=theme_manager.get_color('BG_PRIMARY'),
+                           fg=theme_manager.get_color('FG_PRIMARY'),
+                           relief='solid', bd=1, height=14)
+        scrollbar = ttk.Scrollbar(result_frame, orient='vertical',
+                                  command=result_text.yview)
+        result_text.configure(yscrollcommand=scrollbar.set, state='disabled')
+        result_text.pack(side='left', fill='both', expand=True, pady=(2, 0))
         scrollbar.pack(side='right', fill='y')
 
-        # 关闭按钮
-        close_btn = ModernButton(progress_dialog, "关闭", progress_dialog.destroy,
-                                variant='secondary', width=80, height=30)
-        close_btn.pack(pady=10)
+        # 底部：超时配置 + 工具按钮（复制 / 关闭）
+        bottom = Frame(progress_dialog, bg=progress_dialog.cget('bg'))
+        bottom.pack(fill='x', padx=16, pady=(4, 12), side='bottom')
 
-        # 开始测试
+        timeout_frame = Frame(bottom, bg=progress_dialog.cget('bg'))
+        timeout_frame.pack(side='left')
+        Label(timeout_frame, text="单设备超时(秒):",
+              font=(FONT_FAMILY_UI, 9),
+              fg=theme_manager.get_color('FG_MUTED'),
+              bg=progress_dialog.cget('bg')).pack(side='left')
+        timeout_var = tk.IntVar(value=CONNECTIVITY_TIMEOUT_SECONDS)
+        ttk.Spinbox(timeout_frame, from_=1, to=60, width=5,
+                    textvariable=timeout_var,
+                    font=(FONT_FAMILY_UI, 9)).pack(side='left', padx=(6, 12))
+        Label(timeout_frame, text="(5s 无响应即超时；范围 1-60s)",
+              font=(FONT_FAMILY_UI, 9),
+              fg=theme_manager.get_color('FG_MUTED'),
+              bg=progress_dialog.cget('bg')).pack(side='left')
+
+        utility_btn_frame = Frame(bottom, bg=progress_dialog.cget('bg'))
+        utility_btn_frame.pack(side='right')
+
+        copy_btn  = _btn(utility_btn_frame, "📋 复制结果", 110, 'secondary')
+        close_btn = _btn(utility_btn_frame, "关闭",         80, 'secondary')
+
+        copy_btn.pack(side='left', padx=(0, 8))
+        close_btn.pack(side='left')
+
+        copy_btn.disable()
+
+        # UI 更新辅助
+        def ui_update(fn, *args, **kwargs):
+            try:
+                def _do():
+                    try:
+                        fn(*args, **kwargs)
+                        progress_dialog.update_idletasks()
+                    except Exception:
+                        pass
+                progress_dialog.after(0, _do)
+            except Exception:
+                pass
+
+        def append_result(text):
+            try:
+                result_text.configure(state='normal')
+                result_text.insert(END, text)
+                result_text.see(END)
+                result_text.configure(state='disabled')
+            except Exception:
+                pass
+
+        def reset_result():
+            try:
+                result_text.configure(state='normal')
+                result_text.delete('1.0', END)
+                result_text.configure(state='disabled')
+            except Exception:
+                pass
+
+        def set_progress_label(text):
+            ui_update(progress_label.config, text=text)
+
+        def set_progress_bar(value):
+            ui_update(progress_bar.__setitem__, 'value', value)
+
+        def copy_result_to_clipboard():
+            try:
+                content = result_text.get('1.0', END)
+                progress_dialog.clipboard_clear()
+                progress_dialog.clipboard_append(content)
+                set_progress_label("结果已复制到剪贴板")
+            except Exception as e:
+                debug_log(f"复制结果失败：{e}")
+
+        close_btn.config(command=on_dialog_close)
+        copy_btn.config(command=copy_result_to_clipboard)
+
         def run_test():
-            success_count = 0
-            total_count = len(selected_devices)
-            for i, device in enumerate(selected_devices):
-                if stop_event.is_set():
-                    break
-                
-                progress_label.config(text=f"正在测试 {device['device_name']} ({i+1}/{total_count})...")
-                progress_bar['value'] = i + 1
-                self.root.update_idletasks()
-
-                # 尝试连接设备
+            """并发连通性测试"""
+            try:
                 try:
-                    device_type_id = device['device_type']
-                    if device_type_id not in self.device_types:
-                        result_text.insert(END, f"✗ {device['device_name']}({device['ip']}) - 未知设备类型\n")
-                        result_text.see(END)
-                        continue
+                    cfg_timeout = int(timeout_var.get())
+                    if cfg_timeout < 1 or cfg_timeout > 60:
+                        cfg_timeout = CONNECTIVITY_TIMEOUT_SECONDS
+                except (ValueError, tk.TclError):
+                    cfg_timeout = CONNECTIVITY_TIMEOUT_SECONDS
 
-                    device_config = self.device_types[device_type_id]
-                    
-                    protocol = device.get('protocol', 'ssh') or device_config['default_protocol']
-                    device_driver = device_config['netmiko_type'][protocol]
+                try:
+                    cfg_workers = int(self.concurrency_var.get())
+                except (ValueError, AttributeError):
+                    cfg_workers = 5
+                actual_workers = max(1, min(cfg_workers, 50, len(selected_devices)))
 
-                    device_info = {
-                        'device_type': device_driver,
-                        'ip': device['ip'],
-                        'port': device.get('port', 22),
-                        'timeout': 10,  # 较短的超时时间
-                        'global_delay_factor': 2,
-                        'read_timeout_override': 30,
-                    }
+                state = {'success': 0, 'timeout': 0, 'error': 0,
+                         'completed': 0, 'skipped': 0}
+                lock = threading.Lock()
 
-                    if device.get('username'):
-                        device_info['username'] = device['username']
-                    if device.get('password'):
-                        device_info['password'] = device['password']
-                    if device.get('secret'):
-                        device_info['secret'] = device['secret']
+                def test_one_device(device):
+                    if test_stop_event.is_set():
+                        return ('skipped', '用户停止')
 
-                    # 尝试连接
-                    connection = connect_with_retry(device_info, max_retries=1, retry_delay=1)
-                    if connection:
-                        connection.disconnect()
-                        result_text.insert(END, f"✓ {device['device_name']}({device['ip']}) - 连接成功\n")
-                        result_text.see(END)
-                        success_count += 1
+                    dev_name = device.get('device_name', '?')
+                    dev_ip   = device.get('ip', '?')
+
+                    outcome = ('error', '未知错误')
+                    try:
+                        dtype = device['device_type']
+                        if dtype not in self.device_types:
+                            outcome = ('unknown_type', f"未知设备类型 {dtype}")
+                        else:
+                            dcfg = self.device_types[dtype]
+                            protocol = device.get('protocol', 'ssh') or dcfg['default_protocol']
+                            driver = dcfg['netmiko_type'][protocol]
+
+                            enc_ui = self.encoding_var.get()
+                            if enc_ui == "自动检测":
+                                enc_ui = 'utf-8'
+                            else:
+                                enc_ui = {"UTF-8": "utf-8", "GBK": "gbk",
+                                          "GB2312": "gb2312", "GB18030": "gb18030",
+                                          "Big5": "big5"}.get(enc_ui, 'utf-8')
+                            eff_enc = _resolve_effective_encoding(device, dcfg, enc_ui)
+
+                            dinfo = {
+                                'device_type': driver,
+                                'ip': device['ip'],
+                                'port': device.get('port', 22),
+                                'timeout': cfg_timeout,
+                                'global_delay_factor': 1,
+                                'read_timeout_override': cfg_timeout,
+                                'encoding': eff_enc,
+                            }
+                            if device.get('username'): dinfo['username'] = device['username']
+                            if device.get('password'): dinfo['password'] = device['password']
+                            if device.get('secret'):   dinfo['secret']   = device['secret']
+
+                            conn = connect_with_retry(dinfo, max_retries=0, retry_delay=0)
+                            if conn:
+                                try: conn.disconnect()
+                                except Exception: pass
+                                outcome = ('success', None)
+                            else:
+                                outcome = ('timeout', f"{cfg_timeout}s 无响应")
+                    except Exception as e:
+                        ename = type(e).__name__
+                        if 'Timeout' in ename:
+                            outcome = ('timeout', str(e))
+                        else:
+                            outcome = ('error', f"{ename}: {e}")
+
+                    with lock:
+                        kind = outcome[0]
+                        if kind == 'success':   state['success']   += 1
+                        elif kind == 'timeout': state['timeout']   += 1
+                        elif kind == 'error':   state['error']     += 1
+                        elif kind == 'skipped': state['skipped']   += 1
+                        state['completed'] += 1
+                        lc, ls, lt, le, lk = (state['completed'], state['success'],
+                                              state['timeout'], state['error'],
+                                              state['skipped'])
+
+                    set_progress_label(
+                        f"已完成 {lc}/{len(selected_devices)} "
+                        f"（通 {ls}, 超时 {lt}, 异常 {le}, 跳过 {lk}），最近：{dev_name}"
+                    )
+                    set_progress_bar(lc)
+
+                    kind, msg = outcome
+                    prefix = f"[{lc:>3d}/{len(selected_devices)}] "
+                    if kind == 'success':
+                        line = f"{prefix}✓ {dev_name}({dev_ip}) - 连接成功\n"
+                    elif kind == 'timeout':
+                        line = f"{prefix}⏱ {dev_name}({dev_ip}) - {msg}\n"
+                    elif kind == 'unknown_type':
+                        line = f"{prefix}✗ {dev_name}({dev_ip}) - {msg}\n"
+                    elif kind == 'skipped':
+                        line = f"{prefix}⊘ {dev_name}({dev_ip}) - {msg}\n"
                     else:
-                        result_text.insert(END, f"✗ {device['device_name']}({device['ip']}) - 连接失败\n")
-                        result_text.see(END)
+                        line = f"{prefix}✗ {dev_name}({dev_ip}) - {msg}\n"
+
+                    ui_update(append_result, line)
+                    return outcome
+
+                ui_update(reset_result)
+                ui_update(append_result,
+                          f"开始测试 {len(selected_devices)} 台设备 "
+                          f"（{actual_workers} 并发，单设备超时 {cfg_timeout}s）...\n")
+                set_progress_label(
+                    f"正在进行 0/{len(selected_devices)}（通 0, 超时 0, 异常 0, 跳过 0）"
+                )
+                set_progress_bar(0)
+
+                try:
+                    with ThreadPoolExecutor(max_workers=actual_workers) as ex:
+                        futs = [ex.submit(test_one_device, d) for d in selected_devices]
+                        for f in futs:
+                            try: f.result()
+                            except Exception as e:
+                                log_error(f"连通性测试任务异常：{e}")
                 except Exception as e:
-                    result_text.insert(END, f"✗ {device['device_name']}({device['ip']}) - 错误: {str(e)}\n")
-                    result_text.see(END)
+                    import traceback as _tb
+                    tb_text = _tb.format_exc()
+                    log_error(f"连通性测试线程异常：{e}")
+                    log_error(tb_text)
+                    ui_update(append_result, f"\n[ERROR] 线程异常：{e}\n{tb_text}\n")
+                    set_progress_label(f"线程异常：{e}")
 
-            progress_label.config(text=f"测试完成: {success_count}/{total_count} 台设备连通")
-            result_text.insert(END, f"\n测试总结: {success_count}/{total_count} 台设备连通\n")
-            result_text.see(END)
+                stopped = "（已停止）" if test_stop_event.is_set() else ""
+                fs, ft, fe, fk = state['success'], state['timeout'], state['error'], state['skipped']
+                total = len(selected_devices)
+                failed = total - fs
+                set_progress_label(
+                    f"测试完成{stopped}: {fs}/{total} 通 "
+                    f"(超时 {ft}, 失败 {failed}, 异常 {fe}, 跳过 {fk}；"
+                    f"{actual_workers} 并发 × {cfg_timeout}s 超时)"
+                )
+                ui_update(append_result,
+                          f"\n{'='*50}\n"
+                          f"测试总结{stopped}：\n"
+                          f"  总数：{total}\n"
+                          f"  通：{fs}\n"
+                          f"  超时：{ft}\n"
+                          f"  失败：{failed}\n"
+                          f"  异常：{fe}\n"
+                          f"  跳过：{fk}\n"
+                          f"  并发：{actual_workers}\n"
+                          f"  单设备超时：{cfg_timeout}s\n"
+                          f"{'='*50}\n")
+            finally:
+                def reset_buttons():
+                    try:
+                        start_btn.enable()
+                        stop_btn.disable()
+                        copy_btn.enable()
+                    except Exception:
+                        pass
+                ui_update(reset_buttons)
 
-        # 在后台线程中运行测试
-        threading.Thread(target=run_test, daemon=True).start()
+        def on_start():
+            test_stop_event.clear()
+            try:
+                start_btn.disable()
+                stop_btn.enable()
+                copy_btn.disable()
+            except Exception:
+                pass
+            threading.Thread(target=run_test, daemon=True).start()
+
+        def on_stop():
+            test_stop_event.set()
+            try: stop_btn.disable()
+            except Exception: pass
+            set_progress_label("正在停止...")
+
+        start_btn.config(command=on_start)
+        stop_btn.config(command=on_stop)
 
     def check_inspection_complete(self):
-        """检查巡检是否完成"""
+        """检查巡检是否完成（使用真实结果数据，不再从 status_var 字符串 hack）"""
         if not self.inspection_running:
             return
 
-        if self.progress_var.get() == 100 or stop_event.is_set():
+        selected_devices = [d for d in self.devices if d.get('selected', True)]
+        total_selected = len(selected_devices)
+        results = getattr(self, 'inspection_results', []) or []
+        completed = len(results)
+
+        # 终止条件：所有选中设备都已处理，或用户主动停止
+        done = (completed >= total_selected) or (stop_event.is_set() and completed > 0)
+        # 兜底：worker 自己设了 status 文字也可以作为信号，但不要靠字符串解析
+        worker_done_text = self.status_var.get()
+        worker_signaled = ("巡检完成" in worker_done_text) or ("巡检已停止" in worker_done_text)
+
+        if done or worker_signaled:
             self.inspection_running = False
             self.start_btn.config(state='normal')
             self.stop_btn.config(state='disabled')
-            self.update_status_indicator('success' if self.progress_var.get() == 100 else 'warning')
-            
-            # 更新统计信息
-            selected_devices = [d for d in self.devices if d.get('selected', True)]
-            total_selected = len(selected_devices)
-            self.completed_count = total_selected
-            # 这里需要从巡检结果中获取成功数量
-            # 临时使用状态更新中的成功数量
-            status_text = self.status_var.get()
-            if "成功" in status_text:
-                try:
-                    # 提取成功数量，例如："巡检完成：共5台，成功4台"
-                    parts = status_text.split("，")
-                    for part in parts:
-                        if "成功" in part:
-                            self.success_count = int(part.replace("成功", "").replace("台", ""))
-                            break
-                    self.failed_count = total_selected - self.success_count
-                    self.success_rate = (self.success_count / total_selected) * 100 if total_selected > 0 else 0
-                except:
-                    self.success_count = 0
-                    self.failed_count = total_selected
-                    self.success_rate = 0
+
+            success_count = sum(1 for r in results if r.get('status') == 'success')
+            failed_count = sum(1 for r in results if r.get('status') == 'failed')
+            interrupted_count = sum(1 for r in results if r.get('status') == 'interrupted')
+
+            durations = [r.get('duration', 0) for r in results if r.get('duration', 0) > 0]
+            avg_duration = (sum(durations) / len(durations)) if durations else 0
+            total_duration = sum(durations)
+
+            self.completed_count = completed
+            self.success_count = success_count
+            self.failed_count = failed_count
+            self.success_rate = (success_count / total_selected * 100) if total_selected > 0 else 0
+            self.avg_response_time = avg_duration
+            self.total_duration = total_duration
+
+            if stop_event.is_set() or interrupted_count > 0:
+                self.update_status_indicator('warning')
+            elif failed_count == 0 and success_count > 0:
+                self.update_status_indicator('success')
+            elif success_count == 0:
+                self.update_status_indicator('error')
+            else:
+                self.update_status_indicator('warning')
+
+            LOG_QUEUE.put(
+                f"巡检收尾：共 {total_selected} 台，完成 {completed} 台，"
+                f"成功 {success_count} 台，失败 {failed_count} 台，中断 {interrupted_count} 台"
+            )
             return
 
-        self.root.after(1000, self.check_inspection_complete)
+        self.root.after(500, self.check_inspection_complete)
 
 
 # ==================== 巡检工作线程 ====================
 
-def inspection_worker(devices, device_types, command_files, encodings, status_var, progress_var, max_workers=5):
-    """巡检工作线程 - 使用线程池优化"""
+def inspection_worker(devices, device_types, command_files, encodings, status_var, progress_var,
+                      inspection_results, default_encoding=None, max_workers=5):
+    """巡检工作线程 - 使用线程池优化
+
+    参数:
+        inspection_results: 收集每台设备的结果字典列表，调用方应在调用前重置
+        default_encoding: UI 下拉框选定的默认编码，传给 connect_and_execute
+    """
+    global stop_event
+    try:
+        _run_inspection_worker(devices, device_types, command_files, encodings,
+                               status_var, progress_var, inspection_results,
+                               default_encoding, max_workers)
+    except Exception as e:
+        # 兜底捕获：任何未被内层 try 处理的异常都暴露出来，避免线程静默死亡
+        import traceback as _tb
+        tb_text = _tb.format_exc()
+        error_msg = f"巡检线程顶层错误：{e}"
+        try:
+            LOG_QUEUE.put(f"[ERROR] {error_msg}")
+            LOG_QUEUE.put(tb_text)
+        except Exception:
+            pass
+        try:
+            log_error(error_msg)
+            log_error(tb_text)
+        except Exception:
+            pass
+        try:
+            status_var.set(f"巡检出错：{e}")
+        except Exception:
+            pass
+
+
+def _run_inspection_worker(devices, device_types, command_files, encodings, status_var,
+                            progress_var, inspection_results, default_encoding, max_workers):
+    """inspection_worker 的实际实现"""
     global stop_event
     stop_event.clear()  # 清除之前的停止信号
+
+    if inspection_results is None:
+        inspection_results = []
 
     try:
         selected_devices = [d for d in devices if d.get('selected', True)]
@@ -2366,15 +2681,47 @@ def inspection_worker(devices, device_types, command_files, encodings, status_va
 
         # 动态调整线程数：如果设备数量少于最大线程数，则使用设备数量
         actual_max_workers = min(max_workers, len(selected_devices))
-        
+
         def process_device(device, index):
             """处理单个设备"""
             nonlocal success_count
+
+            # 构建基础结果字典
+            result = {
+                'device_name': device.get('device_name', ''),
+                'ip': device.get('ip', ''),
+                'device_type': device.get('device_type', ''),
+                'protocol': (device.get('protocol') or device_types.get(device.get('device_type', ''), {}).get('default_protocol', '')),
+                'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'end_time': '',
+                'duration': 0.0,
+                'status': 'pending',
+                'log_file': '',
+                'error': ''
+            }
+
             if stop_event.is_set():
+                result['status'] = 'interrupted'
+                result['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                with lock:
+                    inspection_results.append(result)
                 return False
 
-            success, log_file = connect_and_execute(device, device_types, command_files, encodings)
+            start_ts = time.time()
+            success, log_file, error_msg = connect_and_execute(
+                device, device_types, command_files, encodings,
+                default_encoding=default_encoding,
+            )
+            end_ts = time.time()
+
+            result['log_file'] = log_file or ''
+            result['duration'] = round(end_ts - start_ts, 2)
+            result['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            result['error'] = error_msg or ''
+            result['status'] = 'success' if success else 'failed'
+
             with lock:
+                inspection_results.append(result)
                 if success:
                     success_count += 1
                 processed = index + 1
@@ -2427,12 +2774,52 @@ def inspection_worker(devices, device_types, command_files, encodings, status_va
         status_var.set(f"巡检出错：{str(e)}")
 
 
-def connect_and_execute(device, device_types, command_files, encodings):
-    """连接设备并执行命令"""
+def _resolve_effective_encoding(device, device_config, default_encoding):
+    """决定实际传给 Netmiko 的编码。
+    优先级：device['encoding'] > device_config['encoding'] > default_encoding > 'gbk'
+    返回小写字符串；空值/None 视为未指定。
+    默认 GBK 是因为项目中文环境、devices.csv 用 GBK 保存。
+    """
+    for src in (device.get('encoding'),
+                device_config.get('encoding') if isinstance(device_config, dict) else None,
+                default_encoding):
+        if isinstance(src, str) and src.strip():
+            return src.strip().lower()
+    return 'gbk'
+
+
+def _check_encoding_match(output, device_name, current_encoding, threshold=2):
+    """检查输出是否含 Unicode 替换字符（U+FFFD），是则编码不匹配。
+
+    参数:
+        threshold: 超过该数量才算"明显不匹配"，避免单字符巧合
+    返回: (matched: bool, bad_count: int)
+    """
+    if not output or not isinstance(output, str):
+        return True, 0
+    bad_count = output.count('�')
+    if bad_count >= threshold:
+        LOG_QUEUE.put(
+            f"[WARNING] {device_name} 输出含 {bad_count} 个 Unicode 替换字符，"
+            f"当前编码 '{current_encoding}' 似不匹配。"
+            f"建议在 devices.csv 第 9 列指定正确编码（utf-8 / gbk / gb2312 / gb18030）。"
+        )
+        return False, bad_count
+    return True, bad_count
+
+
+def connect_and_execute(device, device_types, command_files, encodings, default_encoding=None):
+    """连接设备并执行命令
+
+    参数:
+        encodings: 备用编码列表，用于 Netmiko 返回 bytes 时的 fallback 解码
+        default_encoding: UI 下拉框选定的默认编码（如 'gbk' / 'utf-8'）；为 None 时取 'utf-8'
+    返回: (success: bool, log_file: str|None, error_msg: str)
+    """
     global stop_event
 
     if stop_event.is_set():
-        return False, None
+        return False, None, "用户已停止巡检"
 
     try:
         device_type_id = device['device_type']
@@ -2440,7 +2827,7 @@ def connect_and_execute(device, device_types, command_files, encodings):
             error_msg = f"设备 {device['device_name']} 的类型 {device_type_id} 未定义"
             LOG_QUEUE.put(error_msg)
             debug_log(error_msg)
-            return False, None
+            return False, None, error_msg
 
         device_config = device_types[device_type_id]
 
@@ -2448,7 +2835,7 @@ def connect_and_execute(device, device_types, command_files, encodings):
             error_msg = f"设备 {device['device_name']} 没有配置巡检命令"
             LOG_QUEUE.put(error_msg)
             debug_log(error_msg)
-            return False, None
+            return False, None, error_msg
 
         commands = command_files[device_type_id][1]
 
@@ -2458,6 +2845,10 @@ def connect_and_execute(device, device_types, command_files, encodings):
 
         device_driver = device_config['netmiko_type'][protocol]
 
+        effective_encoding = _resolve_effective_encoding(device, device_config, default_encoding)
+        LOG_QUEUE.put(f"[INFO] {device['device_name']} 使用编码：{effective_encoding}")
+        debug_log(f"{device['device_name']} effective encoding = {effective_encoding}")
+
         device_info = {
             'device_type': device_driver,
             'ip': device['ip'],
@@ -2465,6 +2856,8 @@ def connect_and_execute(device, device_types, command_files, encodings):
             'timeout': 60,
             'global_delay_factor': 2,
             'read_timeout_override': 120,
+            # 告诉 Netmiko 用什么编码从设备通道读取字节
+            'encoding': effective_encoding,
         }
 
         if device['username'].strip():
@@ -2477,7 +2870,10 @@ def connect_and_execute(device, device_types, command_files, encodings):
         timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         LOG_DIR = os.path.join(os.getcwd(), "InspectionLogs", datetime.now().strftime("%Y_%m_%d"))
         os.makedirs(LOG_DIR, exist_ok=True)
-        log_file = os.path.join(LOG_DIR, f"{device['device_name']}_{device['ip']}_{timestamp}.txt")
+        # 设备名可能含 Windows 非法字符（< > : " / \ | ? *），先 sanitize 再拼路径
+        safe_name = sanitize_filename(device['device_name']) or 'device'
+        safe_ip = sanitize_filename(device['ip']).replace(':', '_')
+        log_file = os.path.join(LOG_DIR, f"{safe_name}_{safe_ip}_{timestamp}.txt")
 
         msg = f"开始处理 {device_config['name']}: {device['device_name']} ({device['ip']})"
         LOG_QUEUE.put(msg)
@@ -2497,7 +2893,7 @@ def connect_and_execute(device, device_types, command_files, encodings):
         if net_connect is None:
             error_msg = f"无法连接到设备 {device['device_name']} ({device['ip']})"
             LOG_QUEUE.put(error_msg)
-            return False, None
+            return False, None, error_msg
 
         try:
             time.sleep(2)
@@ -2511,34 +2907,69 @@ def connect_and_execute(device, device_types, command_files, encodings):
             disable_paging_cmd = device_config['disable_paging_cmd']
             if disable_paging_cmd and disable_paging_cmd.strip():
                 try:
-                    net_connect.send_command(disable_paging_cmd, read_timeout=30)
+                    paging_output = net_connect.send_command(disable_paging_cmd, read_timeout=30)
+                    # 顺手做一次编码自检：用第一条命令输出判断当前 encoding 是否正确
+                    _check_encoding_match(paging_output, device['device_name'], effective_encoding)
                 except Exception as paging_error:
-                    debug_log(f"禁用分页失败：{paging_error}")
+                    # 失败时也提示用户，后续 display/show 输出可能分页截断
+                    warn_msg = f"禁用分页失败({device['device_name']})：{paging_error}，后续命令输出可能被截断"
+                    debug_log(warn_msg)
+                    LOG_QUEUE.put(f"[WARNING] {warn_msg}")
 
             with open(log_file, 'a', encoding='utf-8') as f:
-                for command in commands:
+                for cmd_tuple in commands:
+                    # 兼容旧版（纯字符串）与新版 (cmd, is_heavy, timeout_override)
+                    if isinstance(cmd_tuple, str):
+                        command, is_heavy, timeout_override = cmd_tuple, False, None
+                    else:
+                        command, is_heavy, timeout_override = cmd_tuple
+
                     if stop_event.is_set():
                         f.write("巡检被用户终止\n")
-                        return False, log_file
+                        return False, log_file, "用户中断"
 
-                    f.write(f"执行命令：{command}\n")
+                    # 决定单条命令超时：显式覆盖 > heavy 默认 180s > 普通 60s
+                    if timeout_override is not None and timeout_override > 0:
+                        cmd_timeout = timeout_override
+                    elif is_heavy:
+                        cmd_timeout = 180
+                    else:
+                        cmd_timeout = 60
+
+                    tag = "[HEAVY]" if is_heavy else "[CMD]"
+                    f.write(f"{tag} 执行命令({cmd_timeout}s)：{command}\n")
                     f.write("-" * 50 + "\n")
 
                     try:
-                        output = net_connect.send_command(command, read_timeout=60)
+                        output = net_connect.send_command(command, read_timeout=cmd_timeout)
 
-                        # 编码处理
+                        # 编码处理：理论上 Netmiko 已按 encoding 参数解码成 str，
+                        # 这里兜底处理偶发的 bytes 返回（按 effective_encoding 优先）
                         if isinstance(output, bytes):
-                            for encoding in encodings:
+                            decode_order = [effective_encoding] + [e for e in encodings if e != effective_encoding]
+                            for enc in decode_order:
                                 try:
-                                    output = output.decode(encoding)
+                                    output = output.decode(enc)
                                     break
-                                except:
+                                except Exception:
                                     continue
 
+                        # 编码自检：每条命令输出都查一次替换字符；
+                        # 阈值调高（命令通常很短，2 个以上就说明确实不匹配）
+                        _check_encoding_match(output, device['device_name'],
+                                              effective_encoding, threshold=2)
+
                         f.write(output + "\n\n")
+                    except UnicodeDecodeError as ude:
+                        # 编码错误很常见（设备实际编码与 device['encoding'] 不符），
+                        # 给出明确指引
+                        hint = (f"命令执行失败：编码错误（{ude}）。"
+                                f"当前编码 '{effective_encoding}' 不匹配设备输出。"
+                                f"请在 devices.csv 第 9 列调整编码（utf-8/gbk/gb2312）。")
+                        f.write(hint + "\n\n")
+                        LOG_QUEUE.put(f"[ERROR] {device['device_name']} {hint}")
                     except Exception as cmd_error:
-                        f.write(f"命令执行失败：{cmd_error}\n\n")
+                        f.write(f"命令执行失败({cmd_timeout}s 超时或异常)：{cmd_error}\n\n")
 
         finally:
             # 确保连接被关闭
@@ -2550,18 +2981,18 @@ def connect_and_execute(device, device_types, command_files, encodings):
         msg = f"{device_config['name']} {device['device_name']} 处理完成"
         LOG_QUEUE.put(msg)
         log_info(msg)
-        return True, log_file
+        return True, log_file, ""
 
     except (NetMikoAuthenticationException, NetMikoTimeoutException) as e:
         error_msg = f"设备 {device['device_name']} 连接异常：{str(e)}"
         LOG_QUEUE.put(error_msg)
         log_error(error_msg)
-        return False, None
+        return False, None, error_msg
     except Exception as e:
         error_msg = f"设备 {device['device_name']} 处理失败：{str(e)}"
         LOG_QUEUE.put(error_msg)
         log_error(error_msg)
-        return False, None
+        return False, None, error_msg
 
 
 def connect_with_retry(device_info, max_retries=3, retry_delay=1):
@@ -2598,26 +3029,91 @@ def connect_with_retry(device_info, max_retries=3, retry_delay=1):
     return None
 
 def validate_config_file(file_path, required_columns):
-    """
-    验证配置文件格式
-    :param file_path: 配置文件路径
-    :param required_columns: 必需的列名列表
-    :return: (是否有效, 错误信息列表)
+    """验证配置文件格式
+
+    参数:
+        file_path: 配置文件路径（支持 .csv 用英文逗号 / .txt 用竖线）
+        required_columns: 必需列的列表（兼容旧接口：取其长度作为必需列数）。
+                          也可直接传整数（必需列数）。
+    行为：
+        - 跳过以 # 开头的注释行与空行
+        - 按文件扩展名自动选择分隔符，扩展名无法识别时从首条数据行推断
+        - 取首条非注释数据行，校验列数 ≥ required_columns 且前 N 列均非空
+        - 不再要求英文列名（兼容中文表头/无表头两种格式）
+    返回: (是否有效, 错误信息列表)
     """
     errors = []
-    try:
-        encoding = detect_file_encoding(file_path, ['utf-8', 'gbk', 'gb2312'])
-        with open(file_path, 'r', encoding=encoding) as f:
-            first_line = f.readline().strip()
-            columns = [col.strip() for col in first_line.split(',')]
+    # 兼容两种调用：list/str 取长度，int 直接当列数
+    if isinstance(required_columns, int):
+        n_required = required_columns
+    else:
+        try:
+            n_required = len(required_columns)
+        except TypeError:
+            n_required = 0
 
-        for col in required_columns:
-            if col not in columns:
-                errors.append(f"缺少必需列: {col}")
+    try:
+        encoding = detect_file_encoding(file_path, ['utf-8', 'gbk', 'gb2312', 'gb18030', 'utf-8-sig'])
+        file_ext = os.path.splitext(file_path)[1].lower()
+        # 优先按扩展名选分隔符
+        if file_ext == '.csv':
+            sep = ','
+        elif file_ext == '.txt':
+            sep = '|'
+        else:
+            sep = None  # 后面从内容推断
+
+        first_data_line = None
+        line_no = 0
+        with open(file_path, 'r', encoding=encoding) as f:
+            for raw in f:
+                line_no += 1
+                s = raw.strip()
+                if not s or s.startswith('#'):
+                    continue
+                first_data_line = s
+                first_data_line_no = line_no
+                break
+
+        if first_data_line is None:
+            return False, ["文件为空或全部为注释行，没有可解析的数据"]
+
+        # 自动推断分隔符
+        if sep is None:
+            if ',' in first_data_line and '|' not in first_data_line:
+                sep = ','
+            elif '|' in first_data_line and ',' not in first_data_line:
+                sep = '|'
+            elif first_data_line.count(',') >= first_data_line.count('|'):
+                sep = ','
+            else:
+                sep = '|'
+
+        columns = [c.strip() for c in first_data_line.split(sep)]
+        n_cols = len(columns)
+
+        if n_required > 0 and n_cols < n_required:
+            errors.append(
+                f"首条数据行（第 {first_data_line_no} 行）只有 {n_cols} 列，"
+                f"至少需要 {n_required} 列（必需：设备名/IP/设备类型）"
+            )
+            return False, errors
+
+        # 检查前 n_required 列是否非空
+        if n_required > 0:
+            empty_positions = [
+                (i + 1) for i in range(min(n_required, n_cols)) if not columns[i]
+            ]
+            if empty_positions:
+                errors.append(
+                    f"首条数据行（第 {first_data_line_no} 行）第 "
+                    f"{','.join(str(p) for p in empty_positions)} 列为空"
+                    "（必需字段不能为空）"
+                )
 
         return len(errors) == 0, errors
     except Exception as e:
-        return False, [f"文件读取错误: {str(e)}"]
+        return False, [f"文件读取错误: {e}"]
 
 # ==================== 配置加载辅助函数 ====================
 
@@ -2705,8 +3201,27 @@ def load_device_types_config(file_path, encodings):
         return {}
 
 
+def _parse_selected(value):
+    """把 '1'/'0'/'true'/'false'/'yes'/'no' 等解析为 bool；空值默认 True（向后兼容）"""
+    if value is None:
+        return True
+    s = str(value).strip().lower()
+    if s == '':
+        return True
+    if s in ('0', 'false', 'no', 'off', 'n', 'f'):
+        return False
+    if s in ('1', 'true', 'yes', 'on', 'y', 't'):
+        return True
+    # 兜底：非空且未识别为 false，则视作 true
+    return True
+
+
 def load_devices(file_path, encodings):
-    """加载设备列表"""
+    """加载设备列表
+
+    支持可选的 `selected` 列（第 10 列，CSV）/ `selected` 字段（|分隔末尾，txt）。
+    取值：1/0/true/false/yes/no。缺省视为 True（向后兼容）。
+    """
     log_info(f"开始加载设备列表：{file_path}")
     if not file_path or not os.path.exists(file_path):
         error_msg = f"设备列表文件不存在：{file_path}"
@@ -2737,7 +3252,7 @@ def load_devices(file_path, encodings):
                             'port': int(parts[6].strip()) if len(parts) > 6 and parts[6].strip() else 22,
                             'protocol': parts[7].strip().lower() if len(parts) > 7 and parts[7].strip() else None,
                             'encoding': parts[8].strip() if len(parts) > 8 and parts[8].strip() else None,
-                            'selected': True
+                            'selected': _parse_selected(parts[9]) if len(parts) > 9 else True,
                         }
                         devices.append(device)
             else:
@@ -2757,7 +3272,7 @@ def load_devices(file_path, encodings):
                             'port': int(parts[6]) if len(parts) > 6 and parts[6] else 22,
                             'protocol': parts[7].lower() if len(parts) > 7 and parts[7] else None,
                             'encoding': parts[8].strip() if len(parts) > 8 and parts[8].strip() else None,
-                            'selected': True
+                            'selected': _parse_selected(parts[9]) if len(parts) > 9 else True,
                         }
                         devices.append(device)
 
@@ -2774,7 +3289,14 @@ def load_devices(file_path, encodings):
 
 
 def parse_commands_file(file_path, encodings):
-    """解析命令文件"""
+    """解析命令文件
+
+    返回值：[(command: str, is_heavy: bool), ...]
+    注释行被忽略。
+    支持两个标记：
+        # @heavy   —— 给紧随其后的第一条命令打上"重型"标记
+        # @timeout N —— 给紧随其后的第一条命令设置 N 秒超时
+    """
     commands = []
     if not file_path or not os.path.exists(file_path):
         msg = f"命令文件不存在：{file_path}"
@@ -2785,12 +3307,40 @@ def parse_commands_file(file_path, encodings):
     # 使用编码缓存
     encoding = detect_file_encoding(file_path, encodings)
     try:
+        pending_heavy = False
+        pending_timeout = None
+        heavy_count = 0
         with open(file_path, 'r', encoding=encoding) as f:
             for line in f:
                 stripped_line = line.strip()
-                if stripped_line and not stripped_line.startswith('#'):
-                    commands.append(stripped_line)
+                if not stripped_line:
+                    continue
+                if stripped_line.startswith('#'):
+                    lower = stripped_line.lower()
+                    if lower == '# @heavy':
+                        pending_heavy = True
+                    elif lower.startswith('# @timeout'):
+                        # 形如 "# @timeout 180"
+                        parts = stripped_line.split()
+                        if len(parts) >= 3:
+                            try:
+                                pending_timeout = int(parts[2])
+                            except ValueError:
+                                pass
+                    # 其它注释一律忽略
+                    continue
+
+                cmd = stripped_line
+                timeout_override = pending_timeout
+                is_heavy = pending_heavy
+                if is_heavy:
+                    heavy_count += 1
+                pending_heavy = False
+                pending_timeout = None
+                commands.append((cmd, is_heavy, timeout_override))
         msg = f"成功加载命令文件：{file_path}，共{len(commands)}条命令"
+        if heavy_count:
+            msg += f"，其中重型命令 {heavy_count} 条"
         LOG_QUEUE.put(msg)
         debug_log(msg)
         return commands
