@@ -28,7 +28,22 @@
 
 ## 📦 下载
 
-当前仓库即发行版，无需单独下载：
+前往 [Releases 页面](https://github.com/liuhua1202/network_inspection/releases) 下载最新版（产物文件名带版本号）：
+
+| 平台 | 文件 | 大小 | 说明 |
+|---|---|---|---|
+| Windows | [`NetworkInspector-v2.1.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1/NetworkInspector-v2.1.exe) | ~14 MB | 单文件便携版，零安装，双击即用 |
+| 源码 | `Source code (zip)` / `Source code (tar.gz)` | — | GitHub 自动生成 |
+
+**v2.1 SHA256**：
+```
+7febe7cf21aedf408da62df716b650f6f5505dbdbfafae33d30606e6bee26ee1  NetworkInspector-v2.1.exe
+```
+
+> Windows：双击即用，无需安装。首次启动可能被 SmartScreen 拦截，点"更多信息 → 仍要运行"即可。  
+> 校验：`Get-FileHash .\NetworkInspector-v2.1.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.exe SHA256`。
+
+不需要 Windows 二进制的话也可以直接跑源码：
 
 ```bash
 git clone https://github.com/liuhua1202/network_inspection.git
@@ -36,8 +51,6 @@ cd network_inspection
 pip install -r requirements.txt
 python network_inspection.py
 ```
-
-后续版本将发布到 [Releases 页面](https://github.com/liuhua1202/network_inspection/releases)。
 
 ## 🚀 本地开发
 
