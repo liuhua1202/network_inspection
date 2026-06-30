@@ -1,6 +1,6 @@
 # 网络设备巡检工具 · Network Device Inspector
 
-[![Version](https://img.shields.io/badge/version-v2.1-0078d4?style=flat-square)](#-变更摘要)
+[![Version](https://img.shields.io/badge/version-v2.1.1-0078d4?style=flat-square)](#-变更摘要)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4?style=flat-square)](#-特性)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square)](https://www.python.org/)
@@ -32,16 +32,16 @@
 
 | 平台 | 文件 | 大小 | 说明 |
 |---|---|---|---|
-| Windows | [`NetworkInspector-v2.1.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1/NetworkInspector-v2.1.exe) | ~14 MB | 单文件便携版，零安装，双击即用 |
+| Windows | [`NetworkInspector-v2.1.1.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1.1/NetworkInspector-v2.1.1.exe) | ~14 MB | 单文件便携版，零安装，双击即用 |
 | 源码 | `Source code (zip)` / `Source code (tar.gz)` | — | GitHub 自动生成 |
 
-**v2.1 SHA256**：
+**v2.1.1 SHA256**：
 ```
-7febe7cf21aedf408da62df716b650f6f5505dbdbfafae33d30606e6bee26ee1  NetworkInspector-v2.1.exe
+a80f915159814a76a4b33e65d5817a2e7b63168049e334441d9ff9ab1ecbcc8b  NetworkInspector-v2.1.1.exe
 ```
 
 > Windows：双击即用，无需安装。首次启动可能被 SmartScreen 拦截，点"更多信息 → 仍要运行"即可。  
-> 校验：`Get-FileHash .\NetworkInspector-v2.1.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.exe SHA256`。
+> 校验：`Get-FileHash .\NetworkInspector-v2.1.1.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.1.exe SHA256`。
 
 不需要 Windows 二进制的话也可以直接跑源码：
 
@@ -92,7 +92,7 @@ pyinstaller --onefile --windowed --name NetworkInspector \
 - **[Netmiko 4.x](https://github.com/ktbyers/netmiko)** — SSH / Telnet 设备连接
 - **[pandas](https://pandas.pydata.org/) + [openpyxl](https://openpyxl.readthedocs.io/)** — Excel 导出（可选依赖）
 - **[ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html)** — 并发执行
-- 单文件 `network_inspection.py`（约 3500 行），无第三方 GUI 框架
+- 启动入口 `network_inspection.py`，业务拆为 `core/` + `ui/` + `utils/` 三层（v2.1.1 起模块化），无第三方 GUI 框架
 
 ### 编码处理的三级优先级
 
@@ -120,12 +120,29 @@ show version                   ← 普通命令，60s 超时
 
 ```
 network_inspection/
-├── network_inspection.py        # 主程序（单文件，~3500 行）
+├── network_inspection.py        # 启动入口 + 顶层 API 兼容层（v2.1.1 起拆模块）
 ├── favicon.ico                  # 窗口图标
 ├── requirements.txt             # 依赖清单
 ├── LICENSE                      # MIT
 ├── README.md                    # 本文件
 ├── .gitignore
+├── core/                        # 业务逻辑
+│   ├── config.py                # 设备 / 设备类型 / 命令文件解析
+│   ├── encoding.py              # 编码检测 / 替换字符告警
+│   ├── inspector.py             # 单台设备连接 + 命令执行
+│   └── worker.py                # 巡检 worker + _safe_set_status + ProgressReporter
+├── ui/                          # Tk GUI 层
+│   ├── app.py                   # ModernNetworkInspectionUI（状态栏 / 日志 / 巡检收尾逻辑）
+│   ├── theme.py                 # 主题 + LOG_COLORS 颜色表
+│   └── widgets.py               # ModernButton / ModernEntry / DetailedProgressbar
+├── utils/                       # 通用工具
+│   ├── logging_setup.py         # LOG_QUEUE + 敏感字段脱敏
+│   ├── paths.py                 # 项目目录常量
+│   └── validation.py            # IP / 端口 / 文件名 sanitization
+├── tests/                       # 单元测试
+│   ├── test_pure_functions.py   # 纯函数单测（不依赖 Tk）
+│   ├── test_refactor.py         # 模块拆分回归
+│   └── test_full_verification.py# UI + 集成测试
 ├── config/                      # 运行时配置（CSV / TXT）
 │   ├── devices.csv              # 设备列表（GBK，含中文设备名）
 │   ├── devices.txt              # 同上的 | 分隔版本（备用）
@@ -182,6 +199,32 @@ network_inspection/
 浪潮-huawei-sw-02,192.168.139.2,0,op,Nnteamu@20252,,22,ssh,utf-8,1
 浪潮-linux-host-03,192.168.139.3,5,,,,23,telnet,gb2312,0
 ```
+
+## 📋 v2.1.1 变更摘要
+
+相比 v2.1，本版本聚焦"日志着色 + 跨线程稳定性"两块：
+
+### 🐛 修复
+
+- **运行日志总结行颜色跟随失败数**：巡检完成 / 巡检已停止 / 巡检收尾 / 命令文件关联完成等行，原来的文本都含 "失败" 关键字，被 `_detect_log_level` 一律判成 ERROR 红。现在 worker 显式打 `[SUCCESS]` / `[ERROR]` 前缀 —— `failed_total == 0` 走绿，`failed_total > 0` 走红。结果：用户最关心的"全成功"反馈一眼可见。
+- **"全中断" 场景下两条总结行颜色对打脸**：之前 worker "巡检已停止" 红而 app "巡检收尾" 绿（因为后者没把 interrupted 算进失败）。现在两边一致：中断 ≥ 1 → 红。
+- **worker 跨线程崩 `status_var.set` 静默挂死**：5 处裸奔的 `status_var.set()` 在新版 Tk（Py3.12+ / Tcl 8.6.13+）抛 `RuntimeError: main thread is not in main loop`。新增 `_safe_set_status` helper 集中 swallow，worker 不再因为状态栏写不进去而 crash。
+- **SUCCESS 优先级太低，WARNING/ERROR 过滤模式吞掉绿总结行**：把 SUCCESS 升到 ERROR 同级（priority 3），保证"全成功"在最高过滤级别下也可见。
+- **敏感字段脱敏覆盖到 LOG_QUEUE**：之前 `log_error(traceback_str)` 这一路只会经过 `_redact_sensitive`，而 LOG_QUEUE 上的日志还有没脱敏的尾巴。`debug_log` 入口统一脱敏。
+
+### ✨ 新增
+
+- `TestSummaryLineLevelTag`（5 用例）：覆盖 `all success / all fail / mixed / all interrupted / _detect_log_level` 前缀契约
+- `TestStatusVarThreadSafety`（4 用例）：`_safe_set_status` 单元 + 端到端（status_var 每个 set 都炸时 worker 仍能跑完）
+- `TestSuccessLogLevelPriority`（4 用例）：各级别过滤器的 SUCCESS 可见性契约
+- 模块拆分：单文件 `network_inspection.py` 拆成 `core/` `ui/` `utils/`，顶层文件仅做向后兼容
+
+### 🔧 重构
+
+- `_run_inspection_worker` 抽出 `summary_level = "ERROR" if failed_total > 0 else "SUCCESS"`，与 `[LEVEL]` 前缀约定联动
+- 检查器线程、连通性测试、主巡检各自用本地 `threading.Event()`，全局停止事件共享的历史坑彻底清除（沿用 v2.1 的修复）
+
+---
 
 ## 📋 v2.1 变更摘要
 

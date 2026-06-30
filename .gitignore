@@ -21,7 +21,10 @@ wheels/
 *.egg
 
 # PyInstaller
-*.spec
+# *.spec 是构建配置文件，刻意追踪（构建可复现）
+# 但 PyInstaller 生成的临时 .spec.bak 不追踪
+!network_inspection.spec
+*.spec.bak
 
 # Virtual environments
 venv/
