@@ -9,7 +9,9 @@
 
 基于 Python + Tkinter 的网络设备批量巡检工具，支持 SSH / Telnet 协议、并发执行、结果导出 Excel、GBK / UTF-8 中文输出识别。
 
-![screenshot](docs/screenshot.png)
+<img width="1402" height="932" alt="a271109efdce0bda8d6b5611055a81dd" src="https://github.com/user-attachments/assets/89e9f7ec-017e-427b-90f0-a5883ae63049" />
+
+
 
 ## ✨ 特性
 
