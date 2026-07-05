@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网络设备自动巡检工具 v2.1.1
+网络设备自动巡检工具 v2.1.2
 Network Device Inspection Tool
 
 启动入口：``python network_inspection.py``

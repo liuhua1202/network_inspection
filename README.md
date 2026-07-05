@@ -1,6 +1,6 @@
 # 网络设备巡检工具 · Network Device Inspector
 
-[![Version](https://img.shields.io/badge/version-v2.1.1-0078d4?style=flat-square)](#-变更摘要)
+[![Version](https://img.shields.io/badge/version-v2.1.2-0078d4?style=flat-square)](#-变更摘要)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4?style=flat-square)](#-特性)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square)](https://www.python.org/)
@@ -26,7 +26,7 @@
 - 📊 **结果导出**：巡检结果与统计报告一键导出为 Excel（`.xlsx`）
 - 📁 **配置灵活**：设备列表 / 设备类型 / 命令文件均可用 CSV 或 TXT，每台设备可指定独立编码
 - 📋 **详细日志**：每台设备的执行明细实时写入 `InspectionLogs/<日期>/`，并附带 UTF-8 BOM 报告
-- 🛑 **优雅停止**：随时停止巡检，未完成的设备立即中断，不留后台残留
+- 🛑 **优雅停止**（v2.1.2 改进）：随时停止巡检，**~500ms 内响应**，未完成的设备立即中断，不留后台残留
 
 ## 📦 下载
 
@@ -34,16 +34,16 @@
 
 | 平台 | 文件 | 大小 | 说明 |
 |---|---|---|---|
-| Windows | [`NetworkInspector-v2.1.1.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1.1/NetworkInspector-v2.1.1.exe) | ~14 MB | 单文件便携版，零安装，双击即用 |
+| Windows | [`NetworkInspector-v2.1.2.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1.2/NetworkInspector-v2.1.2.exe) | ~58 MB | 单文件便携版，零安装，双击即用 |
 | 源码 | `Source code (zip)` / `Source code (tar.gz)` | — | GitHub 自动生成 |
 
-**v2.1.1 SHA256**：
+**v2.1.2 SHA256**：
 ```
-a80f915159814a76a4b33e65d5817a2e7b63168049e334441d9ff9ab1ecbcc8b  NetworkInspector-v2.1.1.exe
+cef38d70c28e785efdb01ece33daf2a244c5f3a2aa5460cbedf6e01e632d931a  NetworkInspector-v2.1.2.exe
 ```
 
 > Windows：双击即用，无需安装。首次启动可能被 SmartScreen 拦截，点"更多信息 → 仍要运行"即可。  
-> 校验：`Get-FileHash .\NetworkInspector-v2.1.1.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.1.exe SHA256`。
+> 校验：`Get-FileHash .\NetworkInspector-v2.1.2.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.2.exe SHA256`。
 
 不需要 Windows 二进制的话也可以直接跑源码：
 
@@ -202,6 +202,36 @@ network_inspection/
 浪潮-linux-host-03,192.168.139.3,5,,,,23,telnet,gb2312,0
 ```
 
+## 📋 v2.1.2 变更摘要
+
+相比 v2.1.1，本版本聚焦"停止响应速度 + 状态条交互"两块体验：
+
+### 🐛 修复
+
+- **停止按钮要等 10-60s 才反应**：Netmiko 的 `send_command` / `enable` / `ConnectHandler` 都是阻塞 socket IO，stop_event 检查只在两条命令之间，进入后最多要等满 `read_timeout`（普通命令 60s、heavy 180s、显式覆盖 120s）。这版把 `time.sleep(2)` / `enable()` / `ConnectHandler` 全部用 daemon 线程包一层，stop 一 set 立刻 disconnect 关 socket 让阻塞 IO 失败，主线程最多等 100-300ms 返回。
+- **死连接上 `disconnect()` 自身可能挂 OS TCP 超时**：单独抽出 `_disconnect_fast(timeout=0.3)` 封顶，外层 `finally` 也走这个。
+- **`runner.join(timeout=1.0)` 兜底太长**：收到 stop 信号后 disconnect 完只多等 0.2s 让 runner 收尾，超时直接返回。
+
+实测 stop 响应链路：用户点停止 → 100-300ms 内所有 worker 退出 → UI 按钮翻转。总感知延迟约 **300-500ms**（其中 500ms 来自 `check_inspection_complete` 轮询上限）。
+
+### ✨ 新增
+
+- **`TestInterruptibleSleep` / `TestEnableInterruptible` / `TestConnectHandlerInterruptible` / `TestDisconnectFast`**：4 个新测试类共 10 用例，覆盖所有补好的阻塞点的可中断契约（模拟 5-30s 长耗时，stop 后必须 < 1s 返回）
+- **`_interruptible_sleep(seconds, stop_event)`**：100ms 分段 poll 的 `time.sleep` 替代品
+- **`_enable_interruptible` / `_connect_handler_interruptible` / `_disconnect_fast`**：所有阻塞 IO 包装的统一 helper
+
+### ✨ UI 改进
+
+- **状态栏进度条前进动画**：`DetailedProgressbar` 内部 `progress_var` 从 `IntVar` 换成 `DoubleVar`（IntVar 截断小数让 60fps 步进变成 5% 一格的整数跳）。`set_progress` 收到前进值（target > current）启动 320ms 60fps 缓动；后退 / 重置（target ≤ current）直接 snap 不回弹。巡检进度从"跳跃感"变成"平滑过渡"。
+- **`destroy()` 拦截**：进度条销毁前清掉 in-flight 的 `after` 帧，避免 widget 销毁后 Tk 报 `invalid command name` 噪音
+
+### 🔧 重构
+
+- `_send_command_interruptible` 重构成 `_run_on_conn_interruptible` 通用包装，`send_command` / `enable` 都委托给它，一处维护
+- `connect_with_retry` 改用 `_connect_handler_interruptible`，异常用 `isinstance(exc, NetMikoTimeoutException)` 分发，不再靠字符串匹配
+
+---
+
 ## 📋 v2.1.1 变更摘要
 
 相比 v2.1，本版本聚焦"日志着色 + 跨线程稳定性"两块：
@@ -291,7 +321,7 @@ A: 巡检完成后，点右上角 📊 导出结果 → 选 `.xlsx` 保存。`In
 A: 按 Ctrl+H 切换后窗口颜色应立即变化。本版本已修，会遍历 widget 树刷新所有颜色。如果还不行，关掉重启程序。
 
 **Q: 想批量停掉正在巡检的设备？**
-A: 工具栏点 ⏹ 停止巡检，或 Ctrl+T。当前命令执行完毕后立即中断，未开始的设备不再执行。
+A: 工具栏点 ⏹ 停止巡检，或 Ctrl+T。**v2.1.2 起停止响应从原本的 10-60s 降到 ~500ms** —— Netmiko 的阻塞 IO（send_command / enable / ConnectHandler）全部用 daemon 线程包了可中断包装，stop 一 set 立刻 disconnect 关 socket，让阻塞 IO 立即返回。未开始的设备不再执行。
 
 ## 📄 许可证
 

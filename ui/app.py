@@ -78,7 +78,7 @@ class ModernNetworkInspectionUI:
     def __init__(self, root):
         debug_log("初始化UI")
         self.root = root
-        self.root.title("网络设备自动巡检工具 v2.1.1 | Network Device Inspector")
+        self.root.title("网络设备自动巡检工具 v2.1.2 | Network Device Inspector")
 
         # 窗口图标
         try:
@@ -249,7 +249,7 @@ class ModernNetworkInspectionUI:
               fg=theme_manager.get_color('FG_PRIMARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w')
         Label(inner_frame,
-              text="Network Device Inspector v2.1.1",
+              text="Network Device Inspector v2.1.2",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_SECONDARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w', pady=(4, 0))
@@ -525,7 +525,7 @@ class ModernNetworkInspectionUI:
                                       bg=theme_manager.get_color('BG_CARD'))
         self.status_indicator.pack(side='right', padx=(8, 0))
 
-        Label(inner_frame, text="v2.1.1",
+        Label(inner_frame, text="v2.1.2",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_MUTED'),
               bg=theme_manager.get_color('BG_CARD')).pack(side='right', padx=(8, 0))
@@ -951,7 +951,7 @@ class ModernNetworkInspectionUI:
 • 设备列表中可通过上下箭头键选择设备""")
 
     def show_about(self):
-        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.1.1
+        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.1.2
 
 主要功能：
 • 支持多厂商设备（华为、思科、H3C、Juniper 等）
