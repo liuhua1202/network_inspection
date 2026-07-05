@@ -2,12 +2,13 @@
 
 - ``ModernButton``：自绘按钮（hover / focus / 变体）
 - ``ModernEntry``：带 placeholder 的输入框
-- ``ModernProgressbar``：ttk 风格化的进度条
-- ``DetailedProgressbar``：带详细文本的进度条（实现 ``set_progress(value, text)`` 协议）
+- ``ModernProgressbar``：ttk 风格化的进度条（Canvas 自绘，DoubleVar 驱动）
+- ``DetailedProgressbar``：带详细文本的进度条（实现 ``set_progress(value, text)`` 协议，
+  前进值自动 320ms 缓动）
 - ``LogTag``：日志级别小标签
 """
 import tkinter as tk
-from tkinter import Label, Frame, StringVar, IntVar
+from tkinter import Label, Frame, StringVar, DoubleVar
 from tkinter import ttk
 
 from ui.theme import (
@@ -266,9 +267,9 @@ class ModernProgressbar(tk.Canvas):
     """Metro 风格扁平进度条 —— Canvas 自绘，固定高度（默认 8px）。
 
     继承 tk.Canvas 但对外暴露和 ttk.Progressbar 一样的接口：
-    - configure(variable=IntVar) 通过 IntVar 跟踪进度
+    - configure(variable=DoubleVar) 通过 DoubleVar 跟踪进度
     - ``cget('value')`` / ``itemconfigure(value=...)`` 用于读 / 写
-    简化实现：监听 ``variable``（IntVar 0-100）变化时重绘。
+    简化实现：监听 ``variable``（DoubleVar 0-100）变化时重绘。
     """
 
     def __init__(self, parent, variable=None, maximum=100, bar_height=8,
@@ -293,7 +294,7 @@ class ModernProgressbar(tk.Canvas):
         )
         self.bind('<Configure>', self._on_resize)
         if self._variable is not None:
-            # 监听 IntVar 变化
+            # 监听 DoubleVar 变化
             self._variable.trace_add('write', self._on_var_changed)
             self._on_var_changed()
 
@@ -306,7 +307,7 @@ class ModernProgressbar(tk.Canvas):
         self._redraw_fill()
 
     def _on_var_changed(self, *args):
-        """IntVar 变化回调"""
+        """DoubleVar 变化回调"""
         self._redraw_fill()
 
     def _redraw_fill(self):
@@ -329,13 +330,20 @@ class DetailedProgressbar(Frame):
 
     ``show_label=False`` 时只显示进度条本体（适合状态栏等已有独立文字标签的场景），
     此时 ``set_progress`` 的 ``text`` 参数被忽略。
+
+    内部 ``progress_var`` 使用 ``DoubleVar``，所以 ``set_progress`` 收到前进值
+    （target > current）时会启动 320ms 60fps 缓动动画；后退 / 重置直接 snap。
     """
 
     def __init__(self, parent, show_label=True, **kwargs):
         bg = parent.cget('bg') if parent.cget('bg') else theme_manager.get_color('BG_PRIMARY')
         super().__init__(parent, bg=bg, **kwargs)
         self._show_label = show_label
-        self.progress_var = IntVar(value=0)
+        # DoubleVar：让 _animate_progress_to 能以 < 1% 的步长平滑过渡
+        # （IntVar 会在 set() 时截断小数，60fps 步进对动画就完全没意义了）
+        self.progress_var = DoubleVar(value=0.0)
+        self._progress_tween = None
+        self._progress_after_id = None
         self.progress_bar = ModernProgressbar(self, variable=self.progress_var, maximum=100)
         # 居中：上下 pad 各 6px，让 8px 高的条对齐文字基线
         self.progress_bar.pack(fill='x', expand=True, padx=0, pady=6)
@@ -345,16 +353,73 @@ class DetailedProgressbar(Frame):
             self.progress_label.pack(fill='x', expand=True, pady=(2, 0))
 
     def set_progress(self, value, text=""):
-        """ProgressReporter 协议入口"""
+        """ProgressReporter 协议入口
+
+        前进 (target > current) → 启动 320ms 缓动动画
+        后退 / 重置 (target <= current) → 直接 snap，避免动画回弹
+        """
         try:
-            self.progress_var.set(int(value))
+            target = float(value)
         except (TypeError, ValueError):
-            self.progress_var.set(0)
+            target = 0.0
+        current = self.progress_var.get()
+        if target > current:
+            self._animate_progress_to(target)
+        else:
+            self.progress_var.set(target)
+            self._cancel_pending_tick()
         if text and self._show_label and hasattr(self, 'progress_label'):
             self.progress_label.config(text=text)
 
     def get_progress(self):
         return self.progress_var.get()
+
+    def destroy(self):
+        """销毁前清掉 in-flight 动画，避免 after() 回调触发 "invalid command name"
+        （Tk 的 after callback 是按 widget 注册的，destroy 后命令名失效）
+        """
+        self._cancel_pending_tick()
+        super().destroy()
+
+    # ==================== 进度条前进动画 ====================
+
+    def _animate_progress_to(self, target: float, duration_ms: int = 320) -> None:
+        """把进度从当前值平滑过渡到 target。
+
+        60fps (16ms/step)；当 |delta| < 0.5 时直接 snap，避免无意义的
+        一帧抖动。多次调用会覆盖在飞的 tween（新的 target 接管）。
+        """
+        start = self.progress_var.get()
+        delta = target - start
+        if abs(delta) < 0.5:                      # 已经接近就 snap
+            self.progress_var.set(target)
+            self._cancel_pending_tick()
+            return
+        steps = max(1, int(duration_ms / 16))    # 60fps
+        self._progress_tween = {"delta": delta / steps, "left": steps, "target": target}
+        self._tick_progress_animation()
+
+    def _tick_progress_animation(self) -> None:
+        tween = self._progress_tween
+        if not tween:
+            return
+        if tween["left"] <= 0:
+            self.progress_var.set(tween["target"])
+            self._cancel_pending_tick()
+            return
+        self.progress_var.set(self.progress_var.get() + tween["delta"])
+        tween["left"] -= 1
+        self._progress_after_id = self.after(16, self._tick_progress_animation)
+
+    def _cancel_pending_tick(self) -> None:
+        """清掉 tween 并取消已 schedule 但还没跑的 after 帧"""
+        self._progress_tween = None
+        if getattr(self, '_progress_after_id', None):
+            try:
+                self.after_cancel(self._progress_after_id)
+            except tk.TclError:
+                pass
+            self._progress_after_id = None
 
 
 class LogTag(Frame):

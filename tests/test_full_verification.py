@@ -502,6 +502,23 @@ class TestWorkerEndToEnd(unittest.TestCase):
 # ==================== ProgressReporter 协议 ====================
 
 class TestProgressReporter(unittest.TestCase):
+    @staticmethod
+    def _pump_until(root, predicate, timeout_ms=2000, step_ms=20):
+        """pump Tk 事件循环直至 predicate 为真，或超时。
+
+        DetailedProgressbar.set_progress 现在对前进值做 320ms 缓动动画，
+        测试需要主动驱动事件循环才能读到动画结束后的值。
+        """
+        import time as _t
+        elapsed = 0
+        while elapsed < timeout_ms:
+            root.update()
+            if predicate():
+                return True
+            _t.sleep(step_ms / 1000.0)
+            elapsed += step_ms
+        return False
+
     def test_intvar_adapter(self):
         root = tk.Tk()
         try:
@@ -518,6 +535,9 @@ class TestProgressReporter(unittest.TestCase):
             bar = DetailedProgressbar(root)
             r = make_progress_reporter(bar)
             r.set_progress(75, "three quarters")
+            # DetailedProgressbar 现在对前进值做 320ms 60fps 缓动，
+            # 测试需要 pump 事件循环直至动画结束再读最终值
+            self._pump_until(root, lambda: bar.get_progress() >= 75.0, timeout_ms=2000)
             self.assertEqual(bar.get_progress(), 75)
         finally:
             root.destroy()
