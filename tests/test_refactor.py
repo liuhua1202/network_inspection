@@ -211,7 +211,6 @@ class TestSendCommandInterruptible(unittest.TestCase):
     def test_returns_quickly_when_stop_set_during_send(self):
         """send_command 模拟长耗时（5s），中途 set stop_event，
         包装函数必须在 < 1s 内返回，而不是等满 5s"""
-        import threading
         import time
         from core.inspector import _send_command_interruptible
 
@@ -288,6 +287,177 @@ class TestSendCommandInterruptible(unittest.TestCase):
         )
         self.assertIsNone(output)
         self.assertEqual(err, "用户中断")
+
+
+class TestInterruptibleSleep(unittest.TestCase):
+    """_interruptible_sleep 必须可中断，否则 2s 固定等待里点停止要等满 2s"""
+
+    def test_returns_quickly_when_stopped(self):
+        """sleep 3s，200ms 时 set stop，必须 < 500ms 返回"""
+        import time
+        from core.inspector import _interruptible_sleep
+
+        stop_event = threading.Event()
+        threading.Thread(target=lambda: (time.sleep(0.2), stop_event.set()),
+                         daemon=True).start()
+        t0 = time.time()
+        completed = _interruptible_sleep(3.0, stop_event, granularity=0.05)
+        elapsed = time.time() - t0
+        self.assertFalse(completed, "中途被 stop，不应返回 True")
+        self.assertLess(elapsed, 0.5, f"应该 < 500ms 返回，实际 {elapsed:.2f}s")
+
+    def test_completes_normally_without_stop(self):
+        """没 set stop 时必须真的睡够"""
+        import time
+        from core.inspector import _interruptible_sleep
+
+        stop_event = threading.Event()
+        t0 = time.time()
+        completed = _interruptible_sleep(0.3, stop_event, granularity=0.05)
+        elapsed = time.time() - t0
+        self.assertTrue(completed)
+        self.assertGreaterEqual(elapsed, 0.3)
+
+
+class TestEnableInterruptible(unittest.TestCase):
+    """_enable_interruptible 必须能中断 enable() —— 之前是裸调"""
+
+    def test_returns_quickly_when_stop_set(self):
+        """enable 模拟 5s 长耗时，200ms 时 set stop 必须 < 1s 返回"""
+        import time
+        from core.inspector import _enable_interruptible
+
+        stop_event = threading.Event()
+
+        class FakeConn:
+            def __init__(self):
+                self.disconnect_called = False
+            def enable(self):
+                start = time.time()
+                while time.time() - start < 5.0:
+                    if self.disconnect_called:
+                        raise ConnectionResetError("closed")
+                    time.sleep(0.05)
+                return "should not reach"
+            def disconnect(self):
+                self.disconnect_called = True
+
+        fake = FakeConn()
+        threading.Thread(target=lambda: (time.sleep(0.2), stop_event.set()),
+                         daemon=True).start()
+        t0 = time.time()
+        _, err = _enable_interruptible(fake, stop_event)
+        elapsed = time.time() - t0
+        self.assertEqual(err, "用户中断")
+        self.assertLess(elapsed, 1.0, f"应该立刻响应，实际 {elapsed:.2f}s")
+
+
+class TestConnectHandlerInterruptible(unittest.TestCase):
+    """_connect_handler_interruptible 必须响应 stop_event，
+    否则用户点停止后会卡到 Netmiko timeout（默认 60s+）"""
+
+    def test_returns_quickly_when_stop_set(self):
+        """ConnectHandler 模拟 30s 长握手，200ms 时 set stop 必须 < 1s 返回"""
+        import time
+        from core.inspector import _connect_handler_interruptible
+
+        stop_event = threading.Event()
+
+        class FakeConnectHandler:
+            @staticmethod
+            def __call__(*args, **kwargs):
+                start = time.time()
+                while time.time() - start < 30.0:
+                    if stop_event.is_set():
+                        # 没法 disconnect（连接还没建），只能轮询退出
+                        time.sleep(0.01)
+                        continue
+                    time.sleep(0.05)
+                return "should not reach"
+
+        device_info = {"device_type": "fake", "ip": "1.2.3.4"}
+        # monkeypatch ConnectHandler to our fake
+        import core.inspector as insp
+        original = insp.ConnectHandler
+        insp.ConnectHandler = FakeConnectHandler()
+        try:
+            threading.Thread(target=lambda: (time.sleep(0.2), stop_event.set()),
+                             daemon=True).start()
+            t0 = time.time()
+            conn, err = _connect_handler_interruptible(device_info, stop_event)
+            elapsed = time.time() - t0
+            self.assertIsNone(conn)
+            self.assertEqual(err, "用户中断")
+            self.assertLess(elapsed, 1.0, f"应该立刻响应，实际 {elapsed:.2f}s")
+        finally:
+            insp.ConnectHandler = original
+
+    def test_returns_conn_on_success(self):
+        """正常情况返回 ConnectHandler 实例"""
+        from core.inspector import _connect_handler_interruptible
+
+        class FakeConn:
+            pass
+
+        class FakeConnectHandler:
+            @staticmethod
+            def __call__(*args, **kwargs):
+                return FakeConn()
+
+        import core.inspector as insp
+        original = insp.ConnectHandler
+        insp.ConnectHandler = FakeConnectHandler()
+        try:
+            stop_event = threading.Event()
+            conn, err = _connect_handler_interruptible(
+                {"device_type": "fake"}, stop_event)
+            self.assertIsInstance(conn, FakeConn)
+            self.assertIsNone(err)
+        finally:
+            insp.ConnectHandler = original
+
+    def test_returns_exception_instance_on_failure(self):
+        """异常时必须返回 exc_instance（用 isinstance 分发），不能只返回字符串"""
+        from core.inspector import _connect_handler_interruptible, NetMikoTimeoutException
+
+        class FakeConnectHandler:
+            @staticmethod
+            def __call__(*args, **kwargs):
+                raise NetMikoTimeoutException("connection timed out")
+
+        import core.inspector as insp
+        original = insp.ConnectHandler
+        insp.ConnectHandler = FakeConnectHandler()
+        try:
+            stop_event = threading.Event()
+            conn, err = _connect_handler_interruptible(
+                {"device_type": "fake"}, stop_event)
+            self.assertIsNone(conn)
+            self.assertIsNotNone(err)
+            exc, msg = err
+            self.assertIsInstance(exc, NetMikoTimeoutException)
+            self.assertIn("timed out", msg)
+        finally:
+            insp.ConnectHandler = original
+
+
+class TestDisconnectFast(unittest.TestCase):
+    """_disconnect_fast 必须不阻塞 —— 死连接上 disconnect 可能挂 OS TCP 超时"""
+
+    def test_returns_quickly_even_if_disconnect_hangs(self):
+        """disconnect 模拟阻塞 30s，_disconnect_fast 必须 < 1s 返回"""
+        import time
+        from core.inspector import _disconnect_fast
+
+        class FakeConn:
+            def disconnect(self):
+                time.sleep(30)  # 死连接上的 TCP 关闭可能就是这么慢
+
+        t0 = time.time()
+        _disconnect_fast(FakeConn(), timeout=0.3)
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 0.5,
+                        f"应该立刻返回，实际等了 {elapsed:.2f}s")
 
 
 if __name__ == '__main__':

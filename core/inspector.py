@@ -3,10 +3,14 @@
 ``connect_and_execute`` 和 ``connect_with_retry`` 接收 ``stop_event`` 作为参数，
 不再依赖模块全局（v2.1 之前用 ``global stop_event`` 串扰连通性测试与主巡检）。
 
-``_send_command_interruptible`` 是关键：Netmiko 的 ``send_command`` 是阻塞 IO，
-传 ``read_timeout`` 也没法从外部取消。用户点击停止时，靠它包装一层 watcher
-线程，stop_event 一 set 就 disconnect 强制 socket 关闭，让 send_command
-立即返回（抛异常或返回部分输出），不再干等 60-180s。
+所有阻塞 IO 都用 ``_run_on_conn_interruptible`` 包一层 daemon 线程，stop_event
+一 set 就 disconnect 关 socket 让阻塞 IO 立即返回。覆盖：
+- ConnectHandler 初始 SSH 握手
+- send_command / enable / disable_paging 等基于 socket 的命令
+- 死连接上 disconnect 自身 TCP 关闭可能挂 OS 超时，用 ``_disconnect_fast``
+  限制到 0.3s 内返回
+
+目标：用户点击停止后，最多 100-300ms 内 worker 全部返回。
 """
 import os
 import threading
@@ -30,53 +34,105 @@ from utils.validation import sanitize_filename
 from core.encoding import resolve_effective_encoding, check_encoding_match
 
 
-def _send_command_interruptible(net_connect, command, read_timeout, stop_event):
-    """让 Netmiko 的 ``send_command`` 真正能被 stop_event 中断。
+def _interruptible_sleep(seconds, stop_event, granularity=0.1):
+    """time.sleep 的可中断版本 —— 用户点停止时立刻退出，不再干等。
 
-    Netmiko 的 send_command 是阻塞 socket IO，``read_timeout`` 只是最坏情况下
-    的等待上限，从外部传 stop_event 进去也没用 —— send_command 根本不看。
+    返回 True = 睡够了；False = 中途被打断。
+    """
+    if stop_event is None:
+        time.sleep(seconds)
+        return True
+    elapsed = 0.0
+    while elapsed < seconds:
+        if stop_event.is_set():
+            return False
+        time.sleep(min(granularity, seconds - elapsed))
+        elapsed += granularity
+    return True
 
-    方案：开一个 daemon watcher 线程跑 send_command，主线程每 100ms poll
-    stop_event；一旦用户停止，调 net_connect.disconnect() 强制关闭 SSH
-    socket，send_command 在下一次 recv() 上会立刻失败（EOF / ConnectionReset），
-    watcher 线程随之结束。最多多等一个 poll 周期（100ms），不再卡 60-180s。
 
-    返回 (output, error_msg)：
-    - 正常完成   → (output_str, None)
+def _disconnect_fast(net_connect, timeout=0.3):
+    """让 net_connect.disconnect() 不阻塞主流程。
+
+    死连接上的 TCP 关闭可能挂 OS 超时（数十秒），不能让用户等这个。
+    在 daemon 线程里跑 disconnect，最多等 timeout 秒就让线程自生自灭。
+    """
+    if net_connect is None:
+        return
+
+    def _runner():
+        try:
+            net_connect.disconnect()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+
+def _run_on_conn_interruptible(net_connect, func, stop_event, label="op",
+                                join_after_disconnect=0.2):
+    """通用包装：把任意基于 net_connect 的阻塞调用变得可中断。
+
+    工作流：
+    1. daemon 线程里跑 func(net_connect)
+    2. 主线程 poll stop_event（默认 100ms 一次）
+    3. stop_event 一 set → 调 net_connect.disconnect() 关 socket，
+       func 的阻塞 recv() 立刻失败 → runner 线程结束
+    4. 最多再等 join_after_disconnect 秒让 runner 收尾，超时就返回
+
+    返回 (result_value, error_msg)：
+    - 正常完成   → (func 返回值, None)
     - 用户中断   → (None, "用户中断")
-    - 命令异常   → (None, str(exception))，由调用方决定如何写入日志
+    - 调用异常   → (None, str(exception))
     """
     if stop_event is not None and stop_event.is_set():
         return None, "用户中断"
 
-    result = {"output": None, "error": None, "done": False}
+    state = {"value": None, "error": None, "done": False}
 
     def _runner():
         try:
-            result["output"] = net_connect.send_command(command, read_timeout=read_timeout)
+            state["value"] = func()
         except Exception as e:
-            result["error"] = e
+            state["error"] = e
         finally:
-            result["done"] = True
+            state["done"] = True
 
-    runner = threading.Thread(target=_runner, daemon=True)
+    runner = threading.Thread(target=_runner, daemon=True, name=f"netmiko-{label}")
     runner.start()
 
-    # poll stop_event；100ms 间隔足够用户感知"立刻响应"，又不会空转烧 CPU
-    while not result["done"]:
+    while not state["done"]:
         if stop_event is not None and stop_event.is_set():
-            # 强制关 socket —— send_command 的 recv() 会立刻失败
-            try:
-                net_connect.disconnect()
-            except Exception:
-                pass
-            runner.join(timeout=1.0)
+            # 关 socket 强制让阻塞 IO 失败；超时封顶避免死连接拖死主线程
+            _disconnect_fast(net_connect, timeout=0.3)
+            runner.join(timeout=join_after_disconnect)
             return None, "用户中断"
         runner.join(timeout=0.1)
 
-    if result["error"] is not None:
-        return None, str(result["error"])
-    return result["output"], None
+    if state["error"] is not None:
+        return None, str(state["error"])
+    return state["value"], None
+
+
+def _send_command_interruptible(net_connect, command, read_timeout, stop_event):
+    """让 Netmiko 的 ``send_command`` 真正能被 stop_event 中断。
+
+    委托给 ``_run_on_conn_interruptible``，保持外部接口不变（返回 (output, err)）。
+    """
+    def _call():
+        return net_connect.send_command(command, read_timeout=read_timeout)
+    return _run_on_conn_interruptible(net_connect, _call, stop_event,
+                                       label="send_command")
+
+
+def _enable_interruptible(net_connect, stop_event):
+    """让 ``net_connect.enable()`` 也可中断（之前是裸调，最坏可卡 10s+）"""
+    def _call():
+        return net_connect.enable()
+    return _run_on_conn_interruptible(net_connect, _call, stop_event,
+                                       label="enable")
 
 
 def connect_with_retry(device_info, stop_event=None, max_retries=2, retry_delay=2):
@@ -90,37 +146,78 @@ def connect_with_retry(device_info, stop_event=None, max_retries=2, retry_delay=
         if stop_event is not None and stop_event.is_set():
             LOG_QUEUE.put("用户已停止，取消连接重试")
             return None
+        # ConnectHandler 是初始 SSH 握手（可能阻塞数十秒），用 daemon 线程包一层
+        conn, err = _connect_handler_interruptible(device_info, stop_event)
+        if err == "用户中断":
+            LOG_QUEUE.put("用户已停止，取消连接")
+            return None
+        if err is not None:
+            # err 是 (exc_instance, str_repr) —— 用类型分发，不靠字符串匹配
+            exc, _msg = err
+            if isinstance(exc, NetMikoTimeoutException):
+                if attempt < max_retries:
+                    LOG_QUEUE.put(f"连接超时，{retry_delay}秒后重试 ({attempt + 1}/{max_retries})")
+                    if stop_event is not None and not _interruptible_sleep(retry_delay, stop_event):
+                        LOG_QUEUE.put("用户已停止，取消连接重试")
+                        return None
+                else:
+                    LOG_QUEUE.put("连接设备失败，已达最大重试次数")
+            elif isinstance(exc, NetMikoAuthenticationException):
+                LOG_QUEUE.put("认证失败，请检查用户名和密码")
+                return None  # 认证失败通常不重试
+            else:
+                if attempt < max_retries:
+                    LOG_QUEUE.put(f"连接异常，{retry_delay}秒后重试: {_msg}")
+                    if stop_event is not None and not _interruptible_sleep(retry_delay, stop_event):
+                        LOG_QUEUE.put("用户已停止，取消连接重试")
+                        return None
+                else:
+                    LOG_QUEUE.put(f"连接设备失败: {_msg}")
+            continue
+        return conn
+
+
+def _connect_handler_interruptible(device_info, stop_event):
+    """包 ``ConnectHandler(**device_info)``，让它响应 stop_event。
+
+    ConnectHandler 是初始 SSH 握手，没有连接可关。stop 一 set 立刻返回，
+    runner 线程会自然超时（device_info['timeout'] 秒），由 daemon GC 兜底。
+
+    返回 (conn, error)：
+    - 正常       → (ConnectHandler 实例, None)
+    - 用户中断   → (None, "用户中断")
+    - 异常       → (None, (exc_instance, str_repr))  ← 用 isinstance 分发
+    """
+    if stop_event is not None and stop_event.is_set():
+        return None, "用户中断"
+
+    state = {"conn": None, "error": None, "done": False}
+
+    def _runner():
         try:
-            return ConnectHandler(**device_info)
-        except NetMikoTimeoutException:
-            if attempt < max_retries:
-                LOG_QUEUE.put(f"连接超时，{retry_delay}秒后重试 ({attempt + 1}/{max_retries})")
-                if stop_event is not None:
-                    # sleep 期间也要响应 stop；分小段 sleep 便于快速退出
-                    slept = 0.0
-                    while slept < retry_delay and not stop_event.is_set():
-                        time.sleep(0.2)
-                        slept += 0.2
-                else:
-                    time.sleep(retry_delay)
-            else:
-                LOG_QUEUE.put("连接设备失败，已达最大重试次数")
-        except NetMikoAuthenticationException:
-            LOG_QUEUE.put("认证失败，请检查用户名和密码")
-            break  # 认证失败通常不重试
+            state["conn"] = ConnectHandler(**device_info)
         except Exception as e:
-            if attempt < max_retries:
-                LOG_QUEUE.put(f"连接异常，{retry_delay}秒后重试: {e}")
-                if stop_event is not None:
-                    slept = 0.0
-                    while slept < retry_delay and not stop_event.is_set():
-                        time.sleep(0.2)
-                        slept += 0.2
-                else:
-                    time.sleep(retry_delay)
-            else:
-                LOG_QUEUE.put(f"连接设备失败: {e}")
-    return None
+            state["error"] = e
+        finally:
+            state["done"] = True
+
+    runner = threading.Thread(target=_runner, daemon=True, name="netmiko-connect")
+    runner.start()
+
+    while not state["done"]:
+        if stop_event is not None and stop_event.is_set():
+            # 没有连接可关；只多等 100ms 让 runner 自检一次
+            runner.join(timeout=0.1)
+            if state["done"]:
+                if state["error"] is not None:
+                    return None, (state["error"], str(state["error"]))
+                return state["conn"], None
+            return None, "用户中断"
+        runner.join(timeout=0.1)
+
+    if state["error"] is not None:
+        return None, (state["error"], str(state["error"]))
+    return state["conn"], None
 
 
 def connect_and_execute(device, device_types, command_files, encodings,
@@ -209,13 +306,19 @@ def connect_and_execute(device, device_types, command_files, encodings,
             return False, None, error_msg
 
         try:
-            time.sleep(2)
+            # time.sleep 换成可中断版本 —— 用户点停止立即退出，不再干等 2s
+            if not _interruptible_sleep(2, stop_event):
+                f.write("巡检被用户终止\n")
+                return False, log_file, "用户中断"
 
             if device_config['enable_mode']:
-                try:
-                    net_connect.enable()
-                except Exception as enable_error:
-                    debug_log(f"进入特权模式失败：{enable_error}")
+                # enable() 也是阻塞 socket IO，单独包一层
+                _, enable_err = _enable_interruptible(net_connect, stop_event)
+                if enable_err == "用户中断":
+                    f.write("巡检被用户终止\n")
+                    return False, log_file, "用户中断"
+                if enable_err is not None:
+                    debug_log(f"进入特权模式失败：{enable_err}")
 
             disable_paging_cmd = device_config['disable_paging_cmd']
             if disable_paging_cmd and disable_paging_cmd.strip():
@@ -294,10 +397,8 @@ def connect_and_execute(device, device_types, command_files, encodings,
                         f.write(f"命令执行失败({cmd_timeout}s 超时或异常)：{cmd_error}\n\n")
 
         finally:
-            try:
-                net_connect.disconnect()
-            except Exception:
-                pass  # 断开失败不影响主流程
+            # 死连接上 disconnect 可能挂 OS TCP 超时，用 _disconnect_fast 封顶 0.3s
+            _disconnect_fast(net_connect, timeout=0.3)
 
         msg = f"{device_config['name']} {device['device_name']} 处理完成"
         LOG_QUEUE.put(msg)
