@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 import tempfile
+import threading
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if ROOT not in sys.path:
@@ -201,6 +202,92 @@ class TestValidationUtils(unittest.TestCase):
     def test_sanitize_filename_windows_illegal(self):
         result = sanitize_filename('a<b>c:d"e/f\\g|h?i*j')
         self.assertEqual(result, 'a_b_c_d_e_f_g_h_i_j')
+
+
+class TestSendCommandInterruptible(unittest.TestCase):
+    """_send_command_interruptible 必须真的能被 stop_event 中断，
+    否则用户点停止后会卡 60-180s 等 send_command 超时"""
+
+    def test_returns_quickly_when_stop_set_during_send(self):
+        """send_command 模拟长耗时（5s），中途 set stop_event，
+        包装函数必须在 < 1s 内返回，而不是等满 5s"""
+        import threading
+        import time
+        from core.inspector import _send_command_interruptible
+
+        stop_event = threading.Event()
+
+        class FakeConn:
+            def __init__(self):
+                self.disconnect_called = False
+            def send_command(self, command, read_timeout=60):
+                # 模拟一个慢命令：5s 后才返回
+                # 期间 disconnect() 被调用时必须立刻抛异常
+                start = time.time()
+                while time.time() - start < 5.0:
+                    if self.disconnect_called:
+                        raise ConnectionResetError("socket closed by peer")
+                    time.sleep(0.05)
+                return "should not reach"
+            def disconnect(self):
+                self.disconnect_called = True
+
+        fake = FakeConn()
+        # 在 200ms 后 set stop，模拟"用户中途点停止"
+        def stopper():
+            time.sleep(0.2)
+            stop_event.set()
+        threading.Thread(target=stopper, daemon=True).start()
+
+        t0 = time.time()
+        output, err = _send_command_interruptible(
+            fake, "show version", read_timeout=60, stop_event=stop_event
+        )
+        elapsed = time.time() - t0
+
+        # 必须在 1s 内返回（包装层 100ms poll + disconnect + 线程 join）
+        self.assertLess(elapsed, 1.0,
+                        f"应该立刻响应 stop，但等了 {elapsed:.2f}s")
+        self.assertIsNone(output)
+        self.assertEqual(err, "用户中断")
+        self.assertTrue(fake.disconnect_called,
+                        "stop 时必须调 disconnect 强制关闭 socket")
+
+    def test_normal_completion_returns_output(self):
+        """没设 stop_event 时，包装函数应该正常返回 send_command 的输出"""
+        from core.inspector import _send_command_interruptible
+
+        class FakeConn:
+            disconnect_called = False
+            def send_command(self, command, read_timeout=60):
+                return f"OK: {command}"
+            def disconnect(self):
+                self.disconnect_called = True
+
+        stop_event = threading.Event()
+        output, err = _send_command_interruptible(
+            FakeConn(), "show ip", read_timeout=60, stop_event=stop_event
+        )
+        self.assertEqual(output, "OK: show ip")
+        self.assertIsNone(err)
+
+    def test_already_stopped_returns_immediately(self):
+        """stop_event 提前已 set，包装函数应该立即返回，不调 send_command"""
+        from core.inspector import _send_command_interruptible
+
+        class FakeConn:
+            def send_command(self, command, read_timeout=60):
+                raise AssertionError("不应被调用，stop_event 已 set")
+            def disconnect(self):
+                pass
+
+        stop_event = threading.Event()
+        stop_event.set()
+        output, err = _send_command_interruptible(
+            FakeConn(), "show ip", read_timeout=60, stop_event=stop_event
+        )
+        self.assertIsNone(output)
+        self.assertEqual(err, "用户中断")
 
 
 if __name__ == '__main__':

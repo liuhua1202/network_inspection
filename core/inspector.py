@@ -2,8 +2,14 @@
 
 ``connect_and_execute`` 和 ``connect_with_retry`` 接收 ``stop_event`` 作为参数，
 不再依赖模块全局（v2.1 之前用 ``global stop_event`` 串扰连通性测试与主巡检）。
+
+``_send_command_interruptible`` 是关键：Netmiko 的 ``send_command`` 是阻塞 IO，
+传 ``read_timeout`` 也没法从外部取消。用户点击停止时，靠它包装一层 watcher
+线程，stop_event 一 set 就 disconnect 强制 socket 关闭，让 send_command
+立即返回（抛异常或返回部分输出），不再干等 60-180s。
 """
 import os
+import threading
 import time
 from datetime import datetime
 
@@ -24,15 +30,61 @@ from utils.validation import sanitize_filename
 from core.encoding import resolve_effective_encoding, check_encoding_match
 
 
+def _send_command_interruptible(net_connect, command, read_timeout, stop_event):
+    """让 Netmiko 的 ``send_command`` 真正能被 stop_event 中断。
+
+    Netmiko 的 send_command 是阻塞 socket IO，``read_timeout`` 只是最坏情况下
+    的等待上限，从外部传 stop_event 进去也没用 —— send_command 根本不看。
+
+    方案：开一个 daemon watcher 线程跑 send_command，主线程每 100ms poll
+    stop_event；一旦用户停止，调 net_connect.disconnect() 强制关闭 SSH
+    socket，send_command 在下一次 recv() 上会立刻失败（EOF / ConnectionReset），
+    watcher 线程随之结束。最多多等一个 poll 周期（100ms），不再卡 60-180s。
+
+    返回 (output, error_msg)：
+    - 正常完成   → (output_str, None)
+    - 用户中断   → (None, "用户中断")
+    - 命令异常   → (None, str(exception))，由调用方决定如何写入日志
+    """
+    if stop_event is not None and stop_event.is_set():
+        return None, "用户中断"
+
+    result = {"output": None, "error": None, "done": False}
+
+    def _runner():
+        try:
+            result["output"] = net_connect.send_command(command, read_timeout=read_timeout)
+        except Exception as e:
+            result["error"] = e
+        finally:
+            result["done"] = True
+
+    runner = threading.Thread(target=_runner, daemon=True)
+    runner.start()
+
+    # poll stop_event；100ms 间隔足够用户感知"立刻响应"，又不会空转烧 CPU
+    while not result["done"]:
+        if stop_event is not None and stop_event.is_set():
+            # 强制关 socket —— send_command 的 recv() 会立刻失败
+            try:
+                net_connect.disconnect()
+            except Exception:
+                pass
+            runner.join(timeout=1.0)
+            return None, "用户中断"
+        runner.join(timeout=0.1)
+
+    if result["error"] is not None:
+        return None, str(result["error"])
+    return result["output"], None
+
+
 def connect_with_retry(device_info, stop_event=None, max_retries=2, retry_delay=2):
     """带重试机制的 Netmiko 连接。
 
     ``stop_event`` 可选：传入后用户停止时不再 sleep 重试间隔。
     返回 Connection 或 None。
     """
-    if not NETMIKO_AVAILABLE:
-        LOG_QUEUE.put("netmiko 库未安装，无法建立设备连接")
-        return None
 
     for attempt in range(max_retries + 1):
         if stop_event is not None and stop_event.is_set():
@@ -167,14 +219,20 @@ def connect_and_execute(device, device_types, command_files, encodings,
 
             disable_paging_cmd = device_config['disable_paging_cmd']
             if disable_paging_cmd and disable_paging_cmd.strip():
-                try:
-                    paging_output = net_connect.send_command(disable_paging_cmd, read_timeout=30)
-                    # 顺手做一次编码自检
-                    check_encoding_match(paging_output, device['device_name'], effective_encoding)
-                except Exception as paging_error:
-                    warn_msg = f"禁用分页失败({device['device_name']})：{paging_error}，后续命令输出可能被截断"
+                # 用可中断包装：用户点击停止时立即放弃，不要等 30s read_timeout
+                paging_output, paging_err = _send_command_interruptible(
+                    net_connect, disable_paging_cmd, read_timeout=30, stop_event=stop_event
+                )
+                if paging_err == "用户中断":
+                    f.write("巡检被用户终止\n")
+                    return False, log_file, "用户中断"
+                if paging_err is not None:
+                    warn_msg = f"禁用分页失败({device['device_name']})：{paging_err}，后续命令输出可能被截断"
                     debug_log(warn_msg)
                     LOG_QUEUE.put(f"[WARNING] {warn_msg}")
+                else:
+                    # 顺手做一次编码自检
+                    check_encoding_match(paging_output, device['device_name'], effective_encoding)
 
             with open(log_file, 'a', encoding='utf-8') as f:
                 for cmd_tuple in commands:
@@ -197,8 +255,18 @@ def connect_and_execute(device, device_types, command_files, encodings,
                     f.write(f"{tag} 执行命令({cmd_timeout}s)：{command}\n")
                     f.write("-" * 50 + "\n")
 
+                    # 可中断包装：用户点击停止时立即放弃，不再干等 read_timeout
+                    output, cmd_err = _send_command_interruptible(
+                        net_connect, command, read_timeout=cmd_timeout, stop_event=stop_event
+                    )
+
+                    if cmd_err == "用户中断":
+                        f.write("巡检被用户终止\n")
+                        return False, log_file, "用户中断"
+
                     try:
-                        output = net_connect.send_command(command, read_timeout=cmd_timeout)
+                        if cmd_err is not None:
+                            raise Exception(cmd_err)
 
                         # 编码兜底：理论上 Netmiko 已按 encoding 解码成 str；
                         # 这里兜底处理偶发的 bytes 返回
