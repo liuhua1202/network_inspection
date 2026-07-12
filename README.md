@@ -1,6 +1,6 @@
 # 网络设备巡检工具 · Network Device Inspector
 
-[![Version](https://img.shields.io/badge/version-v2.1.2-0078d4?style=flat-square)](#-变更摘要)
+[![Version](https://img.shields.io/badge/version-v2.1.3-0078d4?style=flat-square)](#-变更摘要)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4?style=flat-square)](#-特性)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square)](https://www.python.org/)
@@ -27,6 +27,7 @@
 - 📁 **配置灵活**：设备列表 / 设备类型 / 命令文件均可用 CSV 或 TXT，每台设备可指定独立编码
 - 📋 **详细日志**：每台设备的执行明细实时写入 `InspectionLogs/<日期>/`，并附带 UTF-8 BOM 报告
 - 🛑 **优雅停止**（v2.1.2 改进）：随时停止巡检，**~500ms 内响应**，未完成的设备立即中断，不留后台残留
+- 🪟 **任务栏图标**（v2.1.3 修复）：打包后 Windows 任务栏 / 标题栏 / 系统菜单正确显示 `favicon.ico`（地球+放大镜 logo），不再回退到 Tk 默认调色板
 
 ## 📦 下载
 
@@ -34,16 +35,16 @@
 
 | 平台 | 文件 | 大小 | 说明 |
 |---|---|---|---|
-| Windows | [`NetworkInspector-v2.1.2.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1.2/NetworkInspector-v2.1.2.exe) | ~58 MB | 单文件便携版，零安装，双击即用 |
+| Windows | [`NetworkInspector-v2.1.3.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1.3/NetworkInspector-v2.1.3.exe) | ~58 MB | 单文件便携版，零安装，双击即用 |
 | 源码 | `Source code (zip)` / `Source code (tar.gz)` | — | GitHub 自动生成 |
 
-**v2.1.2 SHA256**：
+**v2.1.3 SHA256**：
 ```
-cef38d70c28e785efdb01ece33daf2a244c5f3a2aa5460cbedf6e01e632d931a  NetworkInspector-v2.1.2.exe
+62488fd08af84a9b9ec7ff177c29bd14b86ad97fb4a86cdd9e9423549aed522f  NetworkInspector-v2.1.3.exe
 ```
 
 > Windows：双击即用，无需安装。首次启动可能被 SmartScreen 拦截，点"更多信息 → 仍要运行"即可。  
-> 校验：`Get-FileHash .\NetworkInspector-v2.1.2.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.2.exe SHA256`。
+> 校验：`Get-FileHash .\NetworkInspector-v2.1.3.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.3.exe SHA256`。
 
 不需要 Windows 二进制的话也可以直接跑源码：
 
@@ -202,6 +203,53 @@ network_inspection/
 浪潮-linux-host-03,192.168.139.3,5,,,,23,telnet,gb2312,0
 ```
 
+## 📋 v2.1.3 变更摘要
+
+相比 v2.1.2，本版本专修"Windows 任务栏图标不对"这一项。
+
+### 🐛 修复
+
+- **打包后任务栏 / 标题栏 / 系统菜单显示 Tk 默认调色板图标**（而不是项目的 `favicon.ico`）
+  - **根因 1：仅用 `iconbitmap()` 不够**。`Tk.iconbitmap` 内部只设 `WM_SETICON`（per-window icon），不会改 `WNDCLASSEX.HICON`（class icon）。Win10/11 任务栏非合并模式 + 系统菜单走的都是 class icon。
+  - **根因 2：HWND 拿错**。文档里说"用 `wm frame` 拿 top-level HWND（class `TkTopLevel`）"，那是老版本 Tk 的行为。在 Py 3.14 + Tk 8.6 + Win11 上，`winfo_id()` / `wm frame` 在 `update()` 之前返回的是同一个窗口（class `TkChild`），`update()` 之后才分离出 `TkTopLevel` 真正的 Windows top-level wrapper。
+  - **根因 3：Tk 会在 `Toplevel.__init__` / paint 事件里用 `SetClassLongPtr` 把 class icon 改回默认**。设一次不够，要 60 秒 `after()` 链持续重设。
+
+### ✨ 新增
+
+- **`ui/icon_helper.py`**（~190 行）
+  - `apply_icon(window)`：跨平台入口（macOS/Linux 走 `iconphoto`；Windows 再走 `iconbitmap` + Win32 强设 + 60 秒 retry 链）
+  - `_apply_icon_win32(window, ico_path)`：直接调 `user32.dll` 强设 `WM_SETICON` + `SetClassLongPtrW`（HICON / HICONSM）
+  - HWND 拿法兼容老 / 新 Tk：先 `wm frame`，fallback `winfo_id()`；用 `GetParent==0 AND GetAncestor(GA_PARENT).class=="#32769"` 判定是 top-level
+- **多分辨率 `favicon.ico`**：原本只有 1 帧 64x64 → 现在 6 帧 16/32/48/64/128/256（手写 ICO header，PNG-in-ICO 编码），覆盖任务栏 16/32、系统菜单 16、资源管理器 48、高分屏 256
+- **PyInstaller `--icon` 嵌入 exe 资源**：之前 `icon=...` 是注释掉的，现在启用，`[System.Drawing.Icon]::ExtractAssociatedIcon` 抽出来是网络设备 logo（地球+放大镜）
+
+### ✨ UI 改进
+
+- 3 个顶层窗口全部设图标：主窗口 + "配置设备类型命令文件"对话框 + "设备连通性测试"进度对话框
+- `apply_icon(self.root)` 放在 `create_ui()` 之后（widget 全部就位 + Tk 已创建 `wm frame` 真正的 top-level），retry 链在 50ms / 150ms / 300ms / 600ms / 1.2s / 2.5s / 5s / 10s / 20s / 35s / 50s / 60s 各重设一次
+
+### 🔧 重构
+
+- `icon_helper` 用 ctypes 强类型签名（`argtypes` / `restype`），64-bit Python 不配会 crash 在 stdcall 栈错位的问题彻底解决
+- `utils/paths.PROJECT_ROOT` 已自动处理 `_MEIPASS`（PyInstaller `--onefile` 模式），`icon_helper` 直接用它定位 `favicon.ico`，源码 / 打包行为一致
+
+### 🧪 验证
+
+- 进程内 `apply_icon` 调用前后 `GCLP_HICON`：从 `0x286419b9`（Tk 默认）→ `0x69d811f7`（我们的 favicon HICON）
+- `ExtractAssociatedIcon("NetworkInspector-v2.1.3.exe")` 抽出 32x32 像素，正是网络设备 logo
+- 130 测试全过（50 pure + 28 refactor + 52 full verification）
+
+### ⚠️ Windows 图标缓存
+
+代码改对了任务栏还显示旧图标？Windows 按 exe 路径缓存图标：
+- 任务栏右键"取消固定 → 重新固定"
+- 或 PowerShell 管理员：`Stop-Process -Name explorer -Force; Start-Process explorer`
+- 或换个文件名 / 路径运行
+
+不影响功能，只影响显示。
+
+---
+
 ## 📋 v2.1.2 变更摘要
 
 相比 v2.1.1，本版本聚焦"停止响应速度 + 状态条交互"两块体验：
@@ -319,6 +367,9 @@ A: 巡检完成后，点右上角 📊 导出结果 → 选 `.xlsx` 保存。`In
 
 **Q: 高对比度模式不生效？**
 A: 按 Ctrl+H 切换后窗口颜色应立即变化。本版本已修，会遍历 widget 树刷新所有颜色。如果还不行，关掉重启程序。
+
+**Q: 任务栏 / 标题栏图标不对（显示 Tk 默认彩色方块而不是网络设备 logo）？**
+A: **v2.1.3 已修**。多分辨率 favicon.ico（16/32/48/64/128/256）+ `ui/icon_helper.py` 跨层强设 WM_SETICON + SetClassLongPtrW + 60 秒 retry 链。如果升级后还看到旧图标：Windows 按 exe 路径缓存图标 → 任务栏右键"取消固定→重新固定"或 PowerShell 跑 `Stop-Process -Name explorer -Force; Start-Process explorer` 清缓存，或换个文件夹名跑新 exe。
 
 **Q: 想批量停掉正在巡检的设备？**
 A: 工具栏点 ⏹ 停止巡检，或 Ctrl+T。**v2.1.2 起停止响应从原本的 10-60s 降到 ~500ms** —— Netmiko 的阻塞 IO（send_command / enable / ConnectHandler）全部用 daemon 线程包了可中断包装，stop 一 set 立刻 disconnect 关 socket，让阻塞 IO 立即返回。未开始的设备不再执行。

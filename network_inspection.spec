@@ -1,10 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec —— 网络设备自动巡检工具 v2.1.2
+"""PyInstaller spec —— 网络设备自动巡检工具 v2.1.3
 
 构建命令（项目根）：
     pyinstaller --clean network_inspection.spec
 
-产物：dist/NetworkInspector-v2.1.2.exe（单文件，便携，零安装）
+产物：dist/NetworkInspector-v2.1.3.exe（单文件，便携，零安装）
 """
 import sys
 from pathlib import Path
@@ -53,7 +53,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='NetworkInspector-v2.1.2',
+    name='NetworkInspector-v2.1.3',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -67,4 +67,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     # icon=str(PROJECT_ROOT / 'favicon.ico'),  # 可选；未嵌入时 Windows 用默认图标
+    icon=str(PROJECT_ROOT / 'favicon.ico'),  # 任务栏图标：把多分辨率 favicon.ico
+                                            # 嵌入 exe 资源（资源管理器 / 开始菜单）
 )

@@ -44,6 +44,7 @@ from ui.theme import (
     CONNECTIVITY_TIMEOUT_SECONDS, LOG_COLORS,
 )
 from ui.widgets import ModernButton, ModernEntry, DetailedProgressbar, LogTag
+from ui.icon_helper import apply_icon  # Windows 任务栏图标强设
 
 # 可选的导出依赖
 try:
@@ -78,16 +79,7 @@ class ModernNetworkInspectionUI:
     def __init__(self, root):
         debug_log("初始化UI")
         self.root = root
-        self.root.title("网络设备自动巡检工具 v2.1.2 | Network Device Inspector")
-
-        # 窗口图标
-        try:
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "favicon.ico")
-            icon_path = os.path.abspath(icon_path)
-            if os.path.exists(icon_path):
-                self.root.iconbitmap(icon_path)
-        except Exception:
-            pass
+        self.root.title("网络设备自动巡检工具 v2.1.3 | Network Device Inspector")
 
         self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
@@ -127,6 +119,10 @@ class ModernNetworkInspectionUI:
 
         self.create_menu()
         self.create_ui()
+        # 应用图标（主窗口标题栏 + 任务栏 + 系统菜单）
+        # 必须在 create_ui() 之后、所有 widget 就位再调，避免 Tk 在 paint
+        # 时机把 SetClassLongPtr 改回去后还要立即覆盖
+        apply_icon(self.root)
         self.root.after(100, self.update_log)
         self.root.after(200, self.init_config_and_load_defaults)
 
@@ -249,7 +245,7 @@ class ModernNetworkInspectionUI:
               fg=theme_manager.get_color('FG_PRIMARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w')
         Label(inner_frame,
-              text="Network Device Inspector v2.1.2",
+              text="Network Device Inspector v2.1.3",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_SECONDARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w', pady=(4, 0))
@@ -525,7 +521,7 @@ class ModernNetworkInspectionUI:
                                       bg=theme_manager.get_color('BG_CARD'))
         self.status_indicator.pack(side='right', padx=(8, 0))
 
-        Label(inner_frame, text="v2.1.2",
+        Label(inner_frame, text="v2.1.3",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_MUTED'),
               bg=theme_manager.get_color('BG_CARD')).pack(side='right', padx=(8, 0))
@@ -951,7 +947,7 @@ class ModernNetworkInspectionUI:
 • 设备列表中可通过上下箭头键选择设备""")
 
     def show_about(self):
-        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.1.2
+        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.1.3
 
 主要功能：
 • 支持多厂商设备（华为、思科、H3C、Juniper 等）
@@ -1246,6 +1242,8 @@ class ModernNetworkInspectionUI:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.configure(bg=theme_manager.get_color('BG_PRIMARY'))
+        # Toplevel 必须自己调一次（标题栏 + 任务栏图标）
+        apply_icon(dialog)
         frame = Frame(dialog, bg=theme_manager.get_color('BG_CARD'))
         frame.pack(fill='both', expand=True, padx=16, pady=16)
         Label(frame, text="设备类型列表", font=(FONT_FAMILY_UI, 12, 'bold'),
@@ -1392,6 +1390,8 @@ class ModernNetworkInspectionUI:
         progress_dialog.geometry("720x520")
         progress_dialog.transient(self.root)
         progress_dialog.grab_set()
+        # Toplevel 必须自己调一次（标题栏 + 任务栏图标）
+        apply_icon(progress_dialog)
 
         def on_dialog_close():
             test_stop_event.set()
