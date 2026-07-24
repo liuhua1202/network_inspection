@@ -43,7 +43,11 @@ from ui.theme import (
     PADDING_X, PADDING_Y, CARD_PADDING, COMPONENT_GAP,
     CONNECTIVITY_TIMEOUT_SECONDS, LOG_COLORS,
 )
-from ui.widgets import ModernButton, ModernEntry, DetailedProgressbar, LogTag
+from ui.widgets import ModernButton, ModernEntry, DetailedProgressbar, LogTag, make_icon_label, IconLibrary, StatCard
+try:
+    from ui.widgets import _PIL_AVAILABLE as PIL_AVAILABLE
+except ImportError:
+    PIL_AVAILABLE = False
 from ui.icon_helper import apply_icon  # Windows 任务栏图标强设
 
 # 可选的导出依赖
@@ -73,13 +77,41 @@ def _default_devices_file():
     return ''
 
 
+class _KpiProgressReporter:
+    """进度上报器：同时驱动进度条与「巡检中」KPI 卡片。
+
+    包裹 ``DetailedProgressbar``，在每次 ``set_progress`` 时把百分比折算成
+    「已完成 / 总数」，并反推「巡检中 = 总数 - 已完成」，实时刷新 KPI 卡片。
+    实现 ``ProgressReporter`` 协议（``set_progress(value, text)``），可直接喂给 worker。
+    """
+
+    def __init__(self, bar, inspecting_card, total_selected):
+        self._bar = bar
+        self._card = inspecting_card
+        self._total = total_selected
+
+    def set_progress(self, value, text=""):
+        try:
+            self._bar.set_progress(value, text)
+        except Exception:
+            pass
+        try:
+            total = self._total
+            completed = int(round((float(value) / 100.0) * total)) if total else 0
+            in_progress = max(0, total - completed)
+            self._card.set_value(in_progress)
+            self._card.set_caption(f"已完成 {completed}/{total}")
+        except Exception:
+            pass
+
+
 class ModernNetworkInspectionUI:
     """网络设备巡检工具"""
 
     def __init__(self, root):
         debug_log("初始化UI")
         self.root = root
-        self.root.title("网络设备自动巡检工具 v2.1.3 | Network Device Inspector")
+        self.root.title("网络设备自动巡检工具 v2.2.1 | Network Device Inspector")
 
         self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
@@ -116,6 +148,9 @@ class ModernNetworkInspectionUI:
         self.avg_response_time = 0
         self.success_rate = 0
         self.inspection_results = []
+        # 配置加载线程安全标志
+        self._config_load_event = threading.Event()
+        self._config_load_result = None
 
         self.create_menu()
         self.create_ui()
@@ -218,6 +253,7 @@ class ModernNetworkInspectionUI:
         main_container.pack(fill='both', expand=True, padx=16, pady=12)
 
         self.create_header_section(main_container)
+        self.create_stats_row(main_container)
         self.create_toolbar(main_container)
         # 巡检配置移到工具栏下方、设备/日志分栏之前（用户要求）
         self.create_config_section(main_container)
@@ -245,7 +281,7 @@ class ModernNetworkInspectionUI:
               fg=theme_manager.get_color('FG_PRIMARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w')
         Label(inner_frame,
-              text="Network Device Inspector v2.1.3",
+              text="Network Device Inspector v2.2.1",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_SECONDARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w', pady=(4, 0))
@@ -257,81 +293,130 @@ class ModernNetworkInspectionUI:
         left_controls = Frame(toolbar_frame, bg=theme_manager.get_color('BG_PRIMARY'))
         left_controls.pack(side='left')
 
-        self.start_btn = ModernButton(left_controls, "🚀 开始巡检", self.start_inspection,
-                                      variant='secondary', width=140, height=38,
+        self.start_btn = ModernButton(left_controls, "开始巡检", self.start_inspection,
+                                      variant='primary', width=140, height=38, icon='play',
                                       aria_label="开始巡检按钮，用于启动网络设备巡检流程")
         self.start_btn.pack(side='left', padx=(0, 8))
-        self.stop_btn = ModernButton(left_controls, "⏹ 停止巡检", self.stop_inspection,
-                                     variant='secondary', width=120, height=38, state='disabled',
+        self.stop_btn = ModernButton(left_controls, "停止巡检", self.stop_inspection,
+                                     variant='danger', width=140, height=38, state='disabled', icon='stop',
                                      aria_label="停止巡检按钮，用于中断正在进行的网络设备巡检")
         self.stop_btn.pack(side='left', padx=(0, 8))
 
         right_controls = Frame(toolbar_frame, bg=theme_manager.get_color('BG_PRIMARY'))
         right_controls.pack(side='right')
-        self.export_results_btn = ModernButton(right_controls, "📊 导出结果", self.export_results,
-                                               variant='secondary', width=110, height=36,
+        # Duotone 双色块：与 KPI 卡片视觉统一的浅色圆角底 + 矢量图标
+        _accent_tile = (theme_manager.get_color('ACCENT'), 26)
+        self.export_results_btn = ModernButton(right_controls, "导出结果", self.export_results,
+                                               variant='secondary', width=110, height=36, icon='download',
+                                               icon_tile=_accent_tile,
                                                aria_label="导出结果按钮，用于将巡检结果导出为Excel文件")
         self.export_results_btn.pack(side='left', padx=(8, 0))
-        self.stats_report_btn = ModernButton(right_controls, "📈 统计报告", self.generate_statistics_report,
-                                             variant='secondary', width=110, height=36,
+        self.stats_report_btn = ModernButton(right_controls, "统计报告", self.generate_statistics_report,
+                                             variant='secondary', width=110, height=36, icon='chart',
+                                             icon_tile=_accent_tile,
                                              aria_label="统计报告按钮，用于生成巡检统计报告")
         self.stats_report_btn.pack(side='left', padx=(8, 0))
-        self.log_dir_btn = ModernButton(right_controls, "📁 日志目录", self.open_log_directory,
-                                        variant='secondary', width=110, height=36,
+        self.log_dir_btn = ModernButton(right_controls, "日志目录", self.open_log_directory,
+                                        variant='secondary', width=110, height=36, icon='folder',
+                                        icon_tile=_accent_tile,
                                         aria_label="打开日志目录按钮，用于打开存储巡检日志的文件夹")
         self.log_dir_btn.pack(side='left', padx=(8, 0))
 
+    def create_stats_row(self, parent):
+        """顶部 KPI 统计行 —— 3 张等宽 StatCard（设备总数 / 已选设备 / 巡检中）。"""
+        stats_frame = Frame(parent, bg=theme_manager.get_color('BG_PRIMARY'))
+        stats_frame.pack(fill='x', pady=(0, 8))
+
+        self.kpi_total = StatCard(stats_frame, 'server', '设备总数', value=0)
+        self.kpi_selected = StatCard(stats_frame, 'check-circle', '已选设备', value=0)
+        self.kpi_inspecting = StatCard(stats_frame, 'activity', '巡检中', value=0,
+                                       caption='待开始')
+
+        cards = [self.kpi_total, self.kpi_selected, self.kpi_inspecting]
+        n = len(cards)
+        for i, card in enumerate(cards):
+            # 末张卡片去掉右侧 gap，使三卡与下方内容左右对齐
+            padx = (0, 0) if i == n - 1 else (0, 8)
+            card.pack(side='left', fill='x', expand=True, padx=padx)
+
+        self.refresh_kpi_counts()
+
+    def refresh_kpi_counts(self):
+        """根据当前设备列表刷新「设备总数 / 已选设备」两张卡片。"""
+        try:
+            devices = getattr(self, 'devices', None) or []
+            total = len(devices)
+            selected = sum(1 for d in devices if d.get('selected', True))
+            if hasattr(self, 'kpi_total'):
+                self.kpi_total.set_value(total)
+            if hasattr(self, 'kpi_selected'):
+                self.kpi_selected.set_value(selected)
+        except Exception:
+            pass
+
     def create_device_panel(self, parent):
-        device_card = Frame(parent, bg=theme_manager.get_color('BG_CARD'))
+        # 占位占位 -- 不再使用 _make_card，直接用 Frame 避免 Canvas 占位
+        device_card = Frame(parent, bg=theme_manager.get_color('BG_CARD'),
+                            highlightthickness=1,
+                            highlightbackground=theme_manager.get_color('BORDER'),
+                            bd=0)
         device_card.pack(fill='both', expand=True, side='top')
 
         header_frame = Frame(device_card, bg=theme_manager.get_color('BG_CARD'))
-        header_frame.pack(fill='x', padx=16, pady=(16, 8))
+        header_frame.pack(fill='x', padx=20, pady=(16, 8))
 
-        Label(header_frame, text="📋 设备列表",
-              font=(FONT_FAMILY_UI, 14, 'bold'),
-              fg=theme_manager.get_color('FG_PRIMARY'),
-              bg=theme_manager.get_color('BG_CARD')).pack(side='left')
+        title_frame, _ = make_icon_label(
+            header_frame, 'list', '设备列表',
+            font=(FONT_FAMILY_UI, 14, 'bold'),
+            fg=theme_manager.get_color('FG_PRIMARY'),
+            bg=theme_manager.get_color('BG_CARD'),
+            icon_size=16,
+        )
+        title_frame.pack(side='left')
 
         btn_frame = Frame(header_frame, bg=theme_manager.get_color('BG_CARD'))
         btn_frame.pack(side='right')
 
         self.select_all_btn = ModernButton(btn_frame, "全选", self.select_all_devices,
-                                           variant='secondary', width=60, height=30,
+                                           variant='secondary', width=60, height=28, icon='select-all',
                                            aria_label="全选按钮")
         self.select_all_btn.pack(side='left', padx=4)
         self.invert_btn = ModernButton(btn_frame, "反选", self.invert_select_devices,
-                                       variant='secondary', width=60, height=30,
+                                       variant='secondary', width=60, height=28, icon='invert',
                                        aria_label="反选按钮")
         self.invert_btn.pack(side='left', padx=4)
+        # 清空：Duotone 单色（浅蓝圆角底 + 同色图标），tile 不额外留白使图标高度
+        # 与同排「全选/反选」Linear 图标一致（均为 16px）
         self.deselect_btn = ModernButton(btn_frame, "清空", self.deselect_all_devices,
-                                         variant='secondary', width=60, height=30,
+                                         variant='secondary', width=60, height=28, icon='trash',
+                                         icon_color=theme_manager.get_color('ACCENT'),
                                          aria_label="清空按钮")
         self.deselect_btn.pack(side='left', padx=4)
 
         search_frame = Frame(device_card, bg=theme_manager.get_color('BG_CARD'))
-        search_frame.pack(fill='x', padx=16, pady=(0, 8))
+        search_frame.pack(fill='x', padx=20, pady=(0, 8))
 
         self.search_var = StringVar()
         self.search_var.trace_add('write', self._on_search_changed)
         self.search_entry = ModernEntry(search_frame,
-                                        placeholder="🔍 搜索设备名称、IP地址、设备类型...",
+                                        placeholder="搜索设备名称、IP地址、设备类型...",
                                         width=40, font=(FONT_FAMILY_UI, 11),
                                         textvariable=self.search_var)
         self.search_entry.pack(side='left', fill='x', expand=True)
 
         list_container = Frame(device_card, bg=theme_manager.get_color('BG_CARD'))
-        list_container.pack(fill='both', expand=True, padx=16, pady=(0, 16))
+        list_container.pack(fill='both', expand=True, padx=20, pady=(0, 16))
 
-        columns = ('select', 'device_name', 'ip', 'device_type', 'protocol')
-        self.device_tree = Treeview(list_container, columns=columns, show='headings',
+        # 列：#0（tree 列）放勾选框图标/字符；其余 4 列放设备属性
+        columns = ('device_name', 'ip', 'device_type', 'protocol')
+        self.device_tree = Treeview(list_container, columns=columns, show='tree headings',
                                     style='DeviceTree.Treeview', selectmode='none')
-        self.device_tree.heading('select', text='选择', anchor='center')
+        self.device_tree.heading('#0', text='选择', anchor='center')
         self.device_tree.heading('device_name', text='设备名称', anchor='w')
         self.device_tree.heading('ip', text='IP 地址', anchor='w')
         self.device_tree.heading('device_type', text='设备类型', anchor='w')
         self.device_tree.heading('protocol', text='协议', anchor='center')
-        self.device_tree.column('select', width=50, anchor='center')
+        self.device_tree.column('#0', width=50, anchor='center', stretch=False)
         self.device_tree.column('device_name', width=140, anchor='w')
         self.device_tree.column('ip', width=130, anchor='w')
         self.device_tree.column('device_type', width=100, anchor='w')
@@ -344,28 +429,38 @@ class ModernNetworkInspectionUI:
 
         style = ttk.Style()
         style.theme_use('clam')
+        # 现代风格 Treeview：紧凑行高 (36) + 斑马纹 + 细边框
         style.configure('DeviceTree.Treeview',
                         background=theme_manager.get_color('BG_CARD'),
                         foreground=theme_manager.get_color('FG_PRIMARY'),
                         fieldbackground=theme_manager.get_color('BG_CARD'),
                         rowheight=36,
                         font=(FONT_FAMILY_UI, 10),
-                        borderwidth=0,
-                        relief='flat',
-                        padding=(0, 4, 0, 4))
+                        borderwidth=1,
+                        relief='solid',
+                        bordercolor=theme_manager.get_color('BORDER'),
+                        padding=(0, 0, 0, 0))
         style.configure('DeviceTree.Treeview.Heading',
                         background=theme_manager.get_color('BG_SECONDARY'),
                         foreground=theme_manager.get_color('FG_PRIMARY'),
                         font=(FONT_FAMILY_UI, 10, 'bold'),
                         relief='flat',
-                        padding=(10, 8, 10, 8))
+                        padding=(10, 6, 10, 6))
         style.map('DeviceTree.Treeview',
                   background=[('selected', theme_manager.get_color('ACCENT'))],
                   foreground=[('selected', '#ffffff')])
         style.configure('Treeview',
                         borderwidth=1,
+                        relief='solid',
+                        bordercolor=theme_manager.get_color('BORDER'),
                         focusthickness=1,
                         focuscolor=theme_manager.get_color('ACCENT'))
+        # 斑马纹
+        self.device_tree.tag_configure('even', background=theme_manager.get_color('BG_CARD'))
+        self.device_tree.tag_configure('odd', background='#f8fafc')
+
+        # 生成勾选框图样（PIL 可用时为圆角蓝底白勾；不可用时 None 占位）
+        self._create_selection_images()
 
         self.device_tree.bind('<Button-1>', self.on_treeview_click)
 
@@ -381,23 +476,28 @@ class ModernNetworkInspectionUI:
         header_frame = Frame(log_card, bg=theme_manager.get_color('BG_CARD'))
         header_frame.pack(fill='x', padx=16, pady=(16, 8))
 
-        Label(header_frame, text="📝 运行日志",
-              font=(FONT_FAMILY_UI, 14, 'bold'),
-              fg=theme_manager.get_color('FG_PRIMARY'),
-              bg=theme_manager.get_color('BG_CARD')).pack(side='left')
+        title_frame, _ = make_icon_label(
+            header_frame, 'doc', '运行日志',
+            font=(FONT_FAMILY_UI, 14, 'bold'),
+            fg=theme_manager.get_color('FG_PRIMARY'),
+            bg=theme_manager.get_color('BG_CARD'),
+            icon_size=16,
+        )
+        title_frame.pack(side='left')
 
         btn_frame = Frame(header_frame, bg=theme_manager.get_color('BG_CARD'))
         btn_frame.pack(side='right')
-        self.copy_log_btn = ModernButton(btn_frame, "📋 复制", self.copy_log,
-                                         variant='secondary', width=70, height=30,
+        self.copy_log_btn = ModernButton(btn_frame, "复制", self.copy_log,
+                                         variant='secondary', width=70, height=30, icon='copy',
                                          aria_label="复制日志按钮")
         self.copy_log_btn.pack(side='left', padx=4)
-        self.export_log_btn = ModernButton(btn_frame, "💾 导出", self.export_log,
-                                           variant='secondary', width=70, height=30,
+        self.export_log_btn = ModernButton(btn_frame, "导出", self.export_log,
+                                           variant='secondary', width=70, height=30, icon='save',
                                            aria_label="导出日志按钮")
         self.export_log_btn.pack(side='left', padx=4)
-        self.clear_log_btn = ModernButton(btn_frame, "🗑 清空", self.clear_log,
-                                          variant='secondary', width=70, height=30,
+        self.clear_log_btn = ModernButton(btn_frame, "清空", self.clear_log,
+                                          variant='secondary', width=70, height=30, icon='trash',
+                                          icon_color=theme_manager.get_color('ACCENT'),
                                           aria_label="清空日志按钮")
         self.clear_log_btn.pack(side='left', padx=4)
 
@@ -439,28 +539,45 @@ class ModernNetworkInspectionUI:
         config_card = Frame(parent, bg=theme_manager.get_color('BG_CARD'))
         config_card.pack(fill='x', pady=(0, 8))
 
-        Label(config_card, text="⚙️ 巡检配置",
-              font=(FONT_FAMILY_UI, 13, 'bold'),
-              fg=theme_manager.get_color('FG_PRIMARY'),
-              bg=theme_manager.get_color('BG_CARD')).pack(anchor='w', padx=16, pady=(12, 8))
+        title_frame, _ = make_icon_label(
+            config_card, 'gear', '巡检配置',
+            font=(FONT_FAMILY_UI, 13, 'bold'),
+            fg=theme_manager.get_color('FG_PRIMARY'),
+            bg=theme_manager.get_color('BG_CARD'),
+            icon_size=16, match_text_height=True,
+        )
+        title_frame.pack(anchor='w', padx=16, pady=(12, 8))
 
         config_frame = Frame(config_card, bg=theme_manager.get_color('BG_CARD'))
         config_frame.pack(fill='x', padx=16, pady=(0, 12))
 
         # 并发线程数
-        Label(config_frame, text="并发线程数:", font=(FONT_FAMILY_UI, 11),
-              fg=theme_manager.get_color('FG_SECONDARY'),
-              bg=theme_manager.get_color('BG_CARD')).pack(side='left', padx=(0, 8))
+        _lbl_frame, _ = make_icon_label(
+            config_frame, 'cpu', '并发线程数:',
+            font=(FONT_FAMILY_UI, 11),
+            fg=theme_manager.get_color('FG_SECONDARY'),
+            bg=theme_manager.get_color('BG_PRIMARY'),
+            icon_size=14, match_text_height=True,
+        )
+        _lbl_frame.pack(side='left', padx=(0, 6))
         self.concurrency_var = StringVar(value="5")
         self.concurrency_spinbox = ttk.Spinbox(config_frame, from_=1, to=50, width=5,
                                                textvariable=self.concurrency_var,
                                                font=(FONT_FAMILY_UI, 11))
         self.concurrency_spinbox.pack(side='left', padx=(0, 24))
+        # 失焦时校验并发线程数：越界或非整数则重置为默认值 5 并提示
+        self.concurrency_spinbox.bind('<FocusOut>',
+                                      lambda e: self._validate_concurrency())
 
         # 输出编码
-        Label(config_frame, text="输出编码:", font=(FONT_FAMILY_UI, 11),
-              fg=theme_manager.get_color('FG_SECONDARY'),
-              bg=theme_manager.get_color('BG_CARD')).pack(side='left', padx=(0, 8))
+        _lbl_frame, _ = make_icon_label(
+            config_frame, 'code', '输出编码:',
+            font=(FONT_FAMILY_UI, 11),
+            fg=theme_manager.get_color('FG_SECONDARY'),
+            bg=theme_manager.get_color('BG_PRIMARY'),
+            icon_size=14, match_text_height=True,
+        )
+        _lbl_frame.pack(side='left', padx=(0, 6))
         self.encoding_var = StringVar(value="自动检测")
         encoding_options = ["自动检测", "UTF-8", "GBK", "GB2312", "GB18030", "Big5"]
         self.encoding_combobox = ttk.Combobox(config_frame, textvariable=self.encoding_var,
@@ -469,9 +586,14 @@ class ModernNetworkInspectionUI:
         self.encoding_combobox.pack(side='left', padx=(0, 24))
 
         # 连接超时
-        Label(config_frame, text="连接超时:", font=(FONT_FAMILY_UI, 11),
-              fg=theme_manager.get_color('FG_SECONDARY'),
-              bg=theme_manager.get_color('BG_CARD')).pack(side='left', padx=(0, 8))
+        _lbl_frame, _ = make_icon_label(
+            config_frame, 'clock', '连接超时:',
+            font=(FONT_FAMILY_UI, 11),
+            fg=theme_manager.get_color('FG_SECONDARY'),
+            bg=theme_manager.get_color('BG_PRIMARY'),
+            icon_size=14, match_text_height=True,
+        )
+        _lbl_frame.pack(side='left', padx=(0, 6))
         self.timeout_var = StringVar(value="30s")
         timeout_options = ["15s", "30s", "45s", "60s", "90s"]
         self.timeout_combobox = ttk.Combobox(config_frame, textvariable=self.timeout_var,
@@ -479,10 +601,14 @@ class ModernNetworkInspectionUI:
                                             font=(FONT_FAMILY_UI, 11))
         self.timeout_combobox.pack(side='left', padx=(0, 24))
 
-        # 日志级别
-        Label(config_frame, text="日志级别:", font=(FONT_FAMILY_UI, 11),
-              fg=theme_manager.get_color('FG_SECONDARY'),
-              bg=theme_manager.get_color('BG_CARD')).pack(side='left', padx=(0, 8))
+        _lbl_frame, _ = make_icon_label(
+            config_frame, 'level', '日志等级:',
+            font=(FONT_FAMILY_UI, 11),
+            fg=theme_manager.get_color('FG_SECONDARY'),
+            bg=theme_manager.get_color('BG_PRIMARY'),
+            icon_size=14, match_text_height=True,
+        )
+        _lbl_frame.pack(side='left', padx=(0, 6))
         self.log_level_var = StringVar(value="INFO")
         log_level_options = ["DEBUG", "INFO", "WARNING", "ERROR"]
         self.log_level_combobox = ttk.Combobox(config_frame, textvariable=self.log_level_var,
@@ -521,7 +647,7 @@ class ModernNetworkInspectionUI:
                                       bg=theme_manager.get_color('BG_CARD'))
         self.status_indicator.pack(side='right', padx=(8, 0))
 
-        Label(inner_frame, text="v2.1.3",
+        Label(inner_frame, text="v2.2.1",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_MUTED'),
               bg=theme_manager.get_color('BG_CARD')).pack(side='right', padx=(8, 0))
@@ -536,32 +662,52 @@ class ModernNetworkInspectionUI:
             debug_log(f"命令目录：{COMMANDS_DIR}")
 
             self.status_var.set("正在加载配置文件...")
+            self._config_load_event.clear()
+            self._config_load_result = None
             threading.Thread(target=self.load_defaults_in_background, daemon=True).start()
+            # 启动 main-thread 轮询（每 100ms 检查 worker 是否完成）
+            self._schedule_config_load_check()
         except Exception as e:
             msg = f"初始化配置目录失败：{e}"
             LOG_QUEUE.put(msg)
             debug_log(msg)
             self.status_var.set(f"初始化失败：{e}")
 
+    def _schedule_config_load_check(self):
+        """main-thread 轮询：检查 worker 是否完成配置加载。"""
+        if self._config_load_event.is_set():
+            result = self._config_load_result
+            if result is not None:
+                success, error = result
+                if error is not None:
+                    self.status_var.set(f"加载配置失败：{error}")
+                    return
+                try:
+                    self._apply_loaded_config_ui(success)
+                except Exception as e:
+                    debug_log(f"应用加载配置到 UI 失败：{e}")
+            return
+        try:
+            self.root.after(100, self._schedule_config_load_check)
+        except Exception:
+            pass
+
     def load_defaults_in_background(self):
+        """Worker 线程：加载默认配置并通过 Event 通知 main thread。"""
+        success = True
+        error = None
         try:
             self.auto_load_default_configs()
         except Exception as e:
-            msg = f"加载配置失败：{e}"
-            LOG_QUEUE.put(msg)
-            debug_log(msg)
-            try:
-                self.root.after(0, lambda: self.status_var.set(f"加载配置失败：{e}"))
-            except (RuntimeError, tk.TclError):
-                # Python 3.14+ Tk 严格线程模型：worker 线程调 after() 可能抛 RuntimeError
-                # 兜底：直接 set（不破坏数据，只是违反"主线程派发 UI"约定）
-                try:
-                    self.status_var.set(f"加载配置失败：{e}")
-                except Exception:
-                    pass
+            success = False
+            error = e
+            LOG_QUEUE.put(f"[ERROR] 加载配置失败：{e}")
+            debug_log(f"加载配置失败：{e}")
+        self._config_load_result = (success, error)
+        self._config_load_event.set()
 
     def auto_load_default_configs(self):
-        success = True
+        """Worker 线程：加载设备类型 + 设备列表 + 命令关联。"""
         device_types_file = _default_device_types_file()
         devices_file = _default_devices_file()
 
@@ -570,7 +716,6 @@ class ModernNetworkInspectionUI:
             self.device_types_file = device_types_file
         else:
             LOG_QUEUE.put("未找到默认设备类型配置文件")
-            success = False
 
         if devices_file and os.path.exists(devices_file):
             self.devices = load_devices(devices_file, self.encodings_config)
@@ -578,16 +723,8 @@ class ModernNetworkInspectionUI:
             self.devices_file = devices_file
         else:
             LOG_QUEUE.put("未找到默认设备列表配置文件")
-            success = False
 
         self.auto_associate_commands_from_device_types()
-        try:
-            self.root.after(0, self._apply_loaded_config_ui, success)
-        except (RuntimeError, tk.TclError):
-            # Python 3.14+ Tk 严格线程模型：worker 线程调 after() 偶发 RuntimeError
-            # 同步直接调，保留等价行为（数据已 load 到 self.*，UI 刷新本来就是兜底）
-            debug_log("auto_load_default_configs: after() 派发失败，同步 _apply_loaded_config_ui 兜底")
-            self._apply_loaded_config_ui(success)
 
     def _apply_loaded_config_ui(self, success):
         try:
@@ -673,52 +810,118 @@ class ModernNetworkInspectionUI:
 
     # ==================== 设备列表 ====================
 
+    def _create_selection_images(self):
+        """生成设备列表勾选框图标。"""
+        self._selected_image = None
+        self._unselected_image = None
+        if not PIL_AVAILABLE:
+            return
+        accent = theme_manager.get_color('ACCENT')
+        outline = '#94a3b8'
+        check_white = '#ffffff'
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            scale = 4
+            size = 18 * scale
+            # Selected
+            img1 = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            d1 = ImageDraw.Draw(img1)
+            d1.rounded_rectangle((scale, scale, size - scale, size - scale),
+                                 radius=4 * scale, fill=accent, outline=accent, width=scale)
+            d1.line([(5*scale, 9*scale), (8*scale, 12*scale), (14*scale, 5*scale)],
+                    fill=check_white, width=2*scale, joint='curve')
+            self._selected_image = ImageTk.PhotoImage(img1.resize((18, 18), Image.Resampling.LANCZOS))
+            # Unselected
+            img2 = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            d2 = ImageDraw.Draw(img2)
+            d2.rounded_rectangle((scale, scale, size - scale, size - scale),
+                                 radius=4 * scale, fill='#ffffff', outline=outline, width=scale)
+            self._unselected_image = ImageTk.PhotoImage(img2.resize((18, 18), Image.Resampling.LANCZOS))
+        except Exception:
+            pass
+
+    def _checkbox_glyph(self, selected: bool):
+        """返回单行勾选框渲染参数 dict。"""
+        if PIL_AVAILABLE and getattr(self, '_selected_image', None) is not None:
+            return {'image': self._selected_image if selected else self._unselected_image, 'text': ''}
+        return {'image': None, 'text': ('☑' if selected else '☐')}
+
+    def _refresh_device_checkbox_images(self):
+        for iid, device in getattr(self, '_iid_to_device', {}).items():
+            glyph = self._checkbox_glyph(device.get('selected', True))
+            item_kwargs = {'text': glyph['text']}
+            if glyph['image'] is not None:
+                item_kwargs['image'] = glyph['image']
+            try:
+                self.device_tree.item(iid, **item_kwargs)
+            except tk.TclError:
+                pass
+
     def update_device_listbox(self):
         for item in self.device_tree.get_children():
             self.device_tree.delete(item)
         self.device_check_vars = {}
-        # iid 用 ASCII 哈希（避免 v2.1 既有 bug：含中文的 iid 在某些 Tk 构建下 encode 失真）
         self._iid_to_device = {}
 
         if not self.devices:
             if not hasattr(self, 'original_devices') or not self.original_devices:
-                self.device_tree.insert('', 'end', values=('', '请先加载设备列表', '', '', ''), tags=('empty',))
+                self.device_tree.insert('', 'end', text='', values=('请先加载设备列表', '', '', ''), tags=('empty', 'odd'))
             else:
-                self.device_tree.insert('', 'end', values=('', '无匹配的设备', '', '', ''), tags=('empty',))
+                self.device_tree.insert('', 'end', text='', values=('无匹配的设备', '', '', ''), tags=('empty', 'odd'))
             return
 
-        for device in self.devices:
+        # 斑马纹：按可见索引交替 even/odd tag
+        for visible_index, device in enumerate(self.devices):
             device_type_id = device.get('device_type', '')
             type_name = self.device_types.get(device_type_id, {}).get('name', device_type_id)
             protocol = (device.get('protocol', '') or 'SSH').upper()
             port = device.get('port', 22)
             iid = self._make_iid(device)
             self._iid_to_device[iid] = device
-            var = IntVar(value=1 if device.get('selected', True) else 0)
+            selected = device.get('selected', True)
+            var = IntVar(value=1 if selected else 0)
             self.device_check_vars[iid] = var
-            checkbox_display = '☑' if device.get('selected', True) else '☐'
-            self.device_tree.insert('', 'end', iid=iid, values=(
-                checkbox_display, device['device_name'],
-                f"{device['ip']}:{port}", type_name, protocol,
-            ), tags=('device',))
+            glyph = self._checkbox_glyph(selected)
+            insert_kwargs = {'text': glyph['text']}
+            if glyph['image'] is not None:
+                insert_kwargs['image'] = glyph['image']
+            zebra_tag = 'even' if visible_index % 2 == 0 else 'odd'
+            self.device_tree.insert(
+                '', 'end', iid=iid,
+                values=(
+                    device['device_name'],
+                    f"{device['ip']}:{port}", type_name, protocol,
+                ),
+                tags=('device', zebra_tag),
+                **insert_kwargs,
+            )
+
+        self.refresh_kpi_counts()
 
     def on_treeview_click(self, event):
         region = self.device_tree.identify_region(event.x, event.y)
-        if region in ('cell', 'tree'):
-            item_id = self.device_tree.identify_row(event.y)
-            if not item_id:
-                return
-            target_device = self._iid_to_device.get(item_id)
-            if target_device is None:
-                return
-            new_state = not target_device.get('selected', True)
-            target_device['selected'] = new_state
-            if item_id in self.device_check_vars:
-                self.device_check_vars[item_id].set(1 if new_state else 0)
-            checkbox_display = '☑' if new_state else '☐'
-            current_values = self.device_tree.item(item_id, 'values')
-            if current_values:
-                self.device_tree.item(item_id, values=(checkbox_display,) + current_values[1:])
+        if region not in ('cell', 'tree'):
+            return
+        item_id = self.device_tree.identify_row(event.y)
+        if not item_id:
+            return
+        # 只在点击 #0（勾选框列）时才切换
+        column = self.device_tree.identify_column(event.x)
+        if column != '#0':
+            return
+        target_device = self._iid_to_device.get(item_id)
+        if target_device is None:
+            return
+        new_state = not target_device.get('selected', True)
+        target_device['selected'] = new_state
+        if item_id in self.device_check_vars:
+            self.device_check_vars[item_id].set(1 if new_state else 0)
+        glyph = self._checkbox_glyph(new_state)
+        item_kwargs = {'text': glyph['text']}
+        if glyph['image'] is not None:
+            item_kwargs['image'] = glyph['image']
+        self.device_tree.item(item_id, **item_kwargs)
+        self.refresh_kpi_counts()
 
     @staticmethod
     def _make_iid(device):
@@ -741,22 +944,28 @@ class ModernNetworkInspectionUI:
             device['selected'] = True
         for var in self.device_check_vars.values():
             var.set(1)
+        glyph = self._checkbox_glyph(True)
+        item_kwargs = {'text': glyph['text']}
+        if glyph['image'] is not None:
+            item_kwargs['image'] = glyph['image']
         for item_id in self.device_tree.get_children():
-            current_values = self.device_tree.item(item_id, 'values')
-            if current_values:
-                self.device_tree.item(item_id, values=('☑',) + current_values[1:])
+            self.device_tree.item(item_id, **item_kwargs)
         LOG_QUEUE.put("已全选所有设备")
+        self.refresh_kpi_counts()
 
     def deselect_all_devices(self):
         for device in self.devices:
             device['selected'] = False
         for var in self.device_check_vars.values():
             var.set(0)
+        glyph = self._checkbox_glyph(False)
+        item_kwargs = {'text': glyph['text']}
+        if glyph['image'] is not None:
+            item_kwargs['image'] = glyph['image']
         for item_id in self.device_tree.get_children():
-            current_values = self.device_tree.item(item_id, 'values')
-            if current_values:
-                self.device_tree.item(item_id, values=('☐',) + current_values[1:])
+            self.device_tree.item(item_id, **item_kwargs)
         LOG_QUEUE.put("已清空所有设备选择")
+        self.refresh_kpi_counts()
 
     def invert_select_devices(self):
         for device in self.devices:
@@ -764,11 +973,13 @@ class ModernNetworkInspectionUI:
         for var in self.device_check_vars.values():
             var.set(0 if var.get() == 1 else 1)
         for iid, device in self._iid_to_device.items():
-            current_values = self.device_tree.item(iid, 'values')
-            if current_values:
-                checkbox_display = '☑' if device['selected'] else '☐'
-                self.device_tree.item(iid, values=(checkbox_display,) + current_values[1:])
+            glyph = self._checkbox_glyph(device['selected'])
+            item_kwargs = {'text': glyph['text']}
+            if glyph['image'] is not None:
+                item_kwargs['image'] = glyph['image']
+            self.device_tree.item(iid, **item_kwargs)
         LOG_QUEUE.put("已反选设备")
+        self.refresh_kpi_counts()
 
     def update_start_button_state(self):
         valid_dt = validate_device_types_config(self.device_types)
@@ -800,7 +1011,7 @@ class ModernNetworkInspectionUI:
 
     def _do_real_time_search(self):
         search_text = self.search_var.get()
-        if not search_text or search_text == "🔍 搜索设备名称、IP地址、设备类型...":
+        if not search_text or search_text == "搜索设备名称、IP地址、设备类型...":
             self._restore_original_devices()
             return
         self._filter_devices(search_text.lower())
@@ -947,7 +1158,7 @@ class ModernNetworkInspectionUI:
 • 设备列表中可通过上下箭头键选择设备""")
 
     def show_about(self):
-        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.1.3
+        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.2.1
 
 主要功能：
 • 支持多厂商设备（华为、思科、H3C、Juniper 等）
@@ -965,6 +1176,10 @@ class ModernNetworkInspectionUI:
         self._reapply_ttk_styles()
         # 递归遍历整棵 widget 树，ModernButton 也会被识别并重绘
         self._reapply_theme_recursive(self.root)
+        # 勾选框图标使用了 ACCENT 主题色，需重新生成
+        if PIL_AVAILABLE:
+            self._create_selection_images()
+            self._refresh_device_checkbox_images()
 
     def _reapply_ttk_styles(self):
         try:
@@ -1307,6 +1522,29 @@ class ModernNetworkInspectionUI:
 
     # ==================== 巡检 ====================
 
+    def _validate_concurrency(self):
+        """校验并发线程数：必须为 1–50 的整数。
+
+        越界或非整数时自动重置为默认值 5，并弹出限制提示。
+        返回校验后的有效整数（始终在 1–50 内）。
+        """
+        default = 5
+        try:
+            val = int(str(self.concurrency_var.get()).strip())
+        except (ValueError, TypeError, AttributeError):
+            val = None
+        if val is None or val < 1 or val > 50:
+            self.concurrency_var.set(str(default))
+            try:
+                self.concurrency_spinbox.set(str(default))
+            except Exception:
+                pass
+            messagebox.showwarning(
+                "并发线程数超出限制",
+                f"并发线程数允许范围为 1–50，已自动重置为默认值 {default}。")
+            return default
+        return val
+
     def start_inspection(self):
         if not NETMIKO_AVAILABLE:
             messagebox.showerror("错误", "缺少依赖库 netmiko，无法执行巡检。请运行：pip install netmiko")
@@ -1318,9 +1556,7 @@ class ModernNetworkInspectionUI:
             messagebox.showwarning("警告", "请至少选择一台设备进行巡检")
             return
         try:
-            max_workers = int(self.concurrency_var.get())
-            if max_workers < 1 or max_workers > 50:
-                raise ValueError("并发数必须在 1-50 之间")
+            max_workers = self._validate_concurrency()
         except ValueError as e:
             messagebox.showerror("错误", f"并发数设置错误：{e}")
             return
@@ -1347,9 +1583,16 @@ class ModernNetworkInspectionUI:
         self.inspection_results = []
         debug_log("开始巡检")
 
+        # KPI「巡检中」：初始全部在巡检中，随进度实时递减
+        if hasattr(self, 'kpi_inspecting'):
+            self.kpi_inspecting.set_value(selected_count, animate=False)
+            self.kpi_inspecting.set_caption("巡检中…")
+
         # 实例级 stop_event：先 clear 再传；connectivity test 用自己的 test_stop_event，互不串扰
         self._stop_event.clear()
-        progress_reporter = make_progress_reporter(self.progress_bar)
+        progress_reporter = _KpiProgressReporter(
+            self.progress_bar, self.kpi_inspecting, selected_count
+        ) if hasattr(self, 'kpi_inspecting') else make_progress_reporter(self.progress_bar)
 
         threading.Thread(
             target=inspection_worker,
@@ -1428,12 +1671,12 @@ class ModernNetworkInspectionUI:
               fg=theme_manager.get_color('FG_PRIMARY'),
               bg=progress_dialog.cget('bg')).pack(side='left', padx=(0, 8))
 
-        def _btn(parent, text, width, variant):
-            return ModernButton(parent, text, width=width, height=34, variant=variant)
+        def _btn(parent, text, width, variant, icon=None):
+            return ModernButton(parent, text, width=width, height=34, variant=variant, icon=icon)
         action_btn_frame = Frame(action_bar, bg=progress_dialog.cget('bg'))
         action_btn_frame.pack(side='left')
-        start_btn = _btn(action_btn_frame, "▶ 开始测试", 130, 'primary')
-        stop_btn = _btn(action_btn_frame, "⏹ 停止", 100, 'danger')
+        start_btn = _btn(action_btn_frame, "开始测试", 130, 'primary', icon='play')
+        stop_btn = _btn(action_btn_frame, "停止", 100, 'danger', icon='stop')
         start_btn.pack(side='left', padx=(0, 8))
         stop_btn.pack(side='left')
         stop_btn.disable()
@@ -1472,7 +1715,7 @@ class ModernNetworkInspectionUI:
               bg=progress_dialog.cget('bg')).pack(side='left')
         utility_btn_frame = Frame(bottom, bg=progress_dialog.cget('bg'))
         utility_btn_frame.pack(side='right')
-        copy_btn = _btn(utility_btn_frame, "📋 复制结果", 110, 'secondary')
+        copy_btn = _btn(utility_btn_frame, "复制结果", 110, 'secondary', icon='copy')
         close_btn = _btn(utility_btn_frame, "关闭", 80, 'secondary')
         copy_btn.pack(side='left', padx=(0, 8))
         close_btn.pack(side='left')
@@ -1620,15 +1863,15 @@ class ModernNetworkInspectionUI:
                     kind, msg = outcome
                     prefix = f"[{lc:>3d}/{len(selected_devices)}] "
                     if kind == 'success':
-                        line = f"{prefix}✓ {dev_name}({dev_ip}) - 连接成功\n"
+                        line = f"{prefix}[成功] {dev_name}({dev_ip}) - 连接成功\n"
                     elif kind == 'timeout':
-                        line = f"{prefix}⏱ {dev_name}({dev_ip}) - {msg}\n"
+                        line = f"{prefix}[超时] {dev_name}({dev_ip}) - {msg}\n"
                     elif kind in ('unknown_type', 'error'):
-                        line = f"{prefix}✗ {dev_name}({dev_ip}) - {msg}\n"
+                        line = f"{prefix}[失败] {dev_name}({dev_ip}) - {msg}\n"
                     elif kind == 'skipped':
-                        line = f"{prefix}⊘ {dev_name}({dev_ip}) - {msg}\n"
+                        line = f"{prefix}[跳过] {dev_name}({dev_ip}) - {msg}\n"
                     else:
-                        line = f"{prefix}✗ {dev_name}({dev_ip}) - {msg}\n"
+                        line = f"{prefix}[失败] {dev_name}({dev_ip}) - {msg}\n"
                     ui_update(append_result, line)
                     return outcome
 
@@ -1725,6 +1968,11 @@ class ModernNetworkInspectionUI:
             self.inspection_running = False
             self.start_btn.config(state='normal')
             self.stop_btn.config(state='disabled')
+
+            # KPI「巡检中」收尾归零
+            if hasattr(self, 'kpi_inspecting'):
+                self.kpi_inspecting.set_value(0, animate=False)
+                self.kpi_inspecting.set_caption("待开始")
 
             success_count = sum(1 for r in results if r.get('status') == 'success')
             failed_count = sum(1 for r in results if r.get('status') == 'failed')

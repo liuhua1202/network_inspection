@@ -1,10 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec —— 网络设备自动巡检工具 v2.1.3
+"""PyInstaller spec —— 网络设备自动巡检工具 v2.2.1
 
 构建命令（项目根）：
     pyinstaller --clean network_inspection.spec
 
-产物：dist/NetworkInspector-v2.1.3.exe（单文件，便携，零安装）
+产物：dist/NetworkInspector-v2.2.1.exe（单文件，便携，零安装）
 """
 import sys
 from pathlib import Path
@@ -53,7 +53,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='NetworkInspector-v2.1.3',
+    name='NetworkInspector-v2.2.1',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

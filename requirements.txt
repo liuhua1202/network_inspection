@@ -11,3 +11,6 @@ openpyxl>=3.0.0
 # Tkinter 通常随 Python 一起安装：
 #   Windows / macOS：python.org 安装包自带
 #   Linux：sudo apt install python3-tk（Debian/Ubuntu）
+
+# 可选：UI 复选框图标渲染（缺失时优雅降级为 Unicode 字符 ☑/☐）
+Pillow>=9.0.0

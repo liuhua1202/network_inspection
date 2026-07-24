@@ -1,6 +1,6 @@
 # 网络设备巡检工具 · Network Device Inspector
 
-[![Version](https://img.shields.io/badge/version-v2.1.3-0078d4?style=flat-square)](#-变更摘要)
+[[[Version](https://img.shields.io/badge/version-v2.2.1-0078d4?style=flat-square)](#-变更摘要)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4?style=flat-square)](#-特性)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square)](https://www.python.org/)
@@ -35,16 +35,16 @@
 
 | 平台 | 文件 | 大小 | 说明 |
 |---|---|---|---|
-| Windows | [`NetworkInspector-v2.1.3.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.1.3/NetworkInspector-v2.1.3.exe) | ~58 MB | 单文件便携版，零安装，双击即用 |
+| Windows | [`NetworkInspector-v2.2.1.exe`](https://github.com/liuhua1202/network_inspection/releases/download/v2.2.1/NetworkInspector-v2.2.1.exe) | ~58 MB | 单文件便携版，零安装，双击即用 |
 | 源码 | `Source code (zip)` / `Source code (tar.gz)` | — | GitHub 自动生成 |
 
-**v2.1.3 SHA256**：
+**v2.2.1 SHA256**：
 ```
-62488fd08af84a9b9ec7ff177c29bd14b86ad97fb4a86cdd9e9423549aed522f  NetworkInspector-v2.1.3.exe
+_将在 release 上传后填充（构建后生成）_  NetworkInspector-v2.2.1.exe
 ```
 
 > Windows：双击即用，无需安装。首次启动可能被 SmartScreen 拦截，点"更多信息 → 仍要运行"即可。  
-> 校验：`Get-FileHash .\NetworkInspector-v2.1.3.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.1.3.exe SHA256`。
+> 校验：`Get-FileHash .\NetworkInspector-v2.2.1.exe -Algorithm SHA256`（PowerShell）或 `certutil -hashfile NetworkInspector-v2.2.1.exe SHA256`。
 
 不需要 Windows 二进制的话也可以直接跑源码：
 
@@ -202,6 +202,76 @@ network_inspection/
 浪潮-huawei-sw-02,192.168.139.2,0,op,Nnteamu@20252,,22,ssh,utf-8,1
 浪潮-linux-host-03,192.168.139.3,5,,,,23,telnet,gb2312,0
 ```
+
+## 📋 v2.2.1 变更摘要
+
+相比 v2.2.0，v2.2.1 聚焦**图标稳定性与界面细节打磨**（均为 v2.2.0 发布后收集的反馈）。建议升级以获得更稳的图标渲染与更紧凑的布局。
+
+### 🐛 修复
+
+- **🛠 按钮图标偶发不显示**。根因是 `Canvas` 上的图标 `PhotoImage` 是局部变量，函数返回后被 Python 垃圾回收，导致按钮只剩文字。已在 `ModernButton` 中增加 `self._btn_icon_photo` 持久引用，图标稳定显示。
+- **🛠 巡检配置齿轮图标看不见**。原线描笔画过细且 PIL 绘制未用 `p()` 缩放，只画出 6×6 的小点。重绘为**实心 8 齿剪影**，标题与配置项前清晰可见。
+
+### ✨ UI 改进
+
+- **🔧 配置项图标高度对齐文字**。`make_icon_label` 新增 `match_text_height`，CPU / 命令 / 时钟 / 日志等级等配置项图标高度与同行文字一致，不再错位。
+- **🗑 清空按钮图标去背景**。设备列表「清空」与日志面板「清空」的图标由浅蓝圆角底改为**透明背景单色（ACCENT 蓝）**，与同排「全选 / 反选」Linear 图标视觉统一。
+- **⏯ 开始 / 停止巡检按钮等宽**（均 140px），视觉更平衡。
+- **📊 KPI 三张卡片重排**：改为**横向排版**，数值与文字说明并排；卡片高度由 ~156px 缩至 ~75px（≈ 原 1/2），充分利用顶部空间、减少纵向占用。
+- **🪟 窗口默认尺寸 1350×860、最小 1000×600**，更适配主流笔记本屏。
+
+### 🔧 交互
+
+- **并发线程数越界保护**。并发数 Spinbox 失焦时若超出允许范围（1–50）或非法，自动重置为默认值 `5` 并弹窗提示，避免误填导致巡检异常。
+
+### 🧪 验证
+
+- 全部 Python 文件 `py_compile` 通过，`import ui.app` 通过
+- 图标渲染目检：清空按钮透明图标、齿轮剪影、配置项等高图标均正常
+- KPI 横向并排布局 + 半高卡片经窗口截图确认
+
+---
+
+## 📋 v2.2.0 变更摘要
+
+相比 v2.1.3，v2.2.0 是一次**视觉与体验重构**：去除 emoji、改用 PIL 矢量图标、加入 KPI 统计卡片、修复 Py 3.14 下的线程崩溃。**强烈建议升级**（界面与稳定性均有显著提升）。
+
+### ✨ 视觉与体验
+
+- **🔤 去 emoji，改 PIL 矢量图标**（ui-ux-pro-max 推荐）。所有 emoji（🚀 📊 📁 🔍 ⏹ 等）替换为 PIL 绘制的 24 个矢量图标（`ui/widgets.py:IconLibrary`）。图标跟随主题色，无字体依赖、跨平台一致。PIL 不可用时优雅降级到 Unicode 字符。
+- **🟦 按钮圆角像素级平滑**（`ModernButton._render_button_bg`）。8× 超采样 + 1px padding + LANCZOS 高质量重采样，Canvas 端整数像素 + .5 偏移定位，彻底消除边缘锯齿。
+- **📊 顶部 3 张 KPI 统计卡片**（`StatCard`）。设备总数 / 已选设备 / 当前巡检中设备实时统计，accent 渐变色条 + 大字号数值（28px bold）+ 趋势说明。
+- **✅ 设备列表勾选框矢量改造**。从 Unicode 字符（☑/☐）改为 PIL 矢量圆角勾选框（蓝底白勾 / 白底灰描边），不依赖系统字体。
+- **🏷 头部图标**：设备列表（list）/ 运行日志（doc，terminal 风格）/ 各配置项（cpu / code / clock / level），所有图标 + 文字在 `make_icon_label` 辅助下统一布局。
+- **🔧 工具栏配置项 inline**。把"巡检配置"独立卡片合并到工具栏：开始巡检 / 停止巡检 | 并发数 / 输出编码 / 连接超时 / 日志等级 | 导出结果 / 统计报告 / 日志目录，节省垂直空间。
+- **🎨 主题切换**。高对比度模式（Ctrl+H）下，所有颜色（含按钮、勾选框、图标）都自动重新生成。
+
+### 🐛 修复
+
+- **🛠 Py 3.14 + Tk 8.6 严格线程模型下 worker 线程调用 widget 崩溃**。原 `auto_load_default_configs` 用 `root.after(0, ...)` 派发 UI 更新，Py 3.14 抛 `RuntimeError: main thread is not in main loop`，fallback 同步调用又导致"主线程派发 UI 约束"崩溃，状态栏永远卡在"正在加载配置文件..."。改用 **thread-safe `Event` + main-thread 轮询** 模式（`_schedule_config_load_check` 每 100ms 检查一次），UI 更新始终在 main 线程。
+- **🛠 设备列表 checkbox 点击区域**。从"任意列切换"改为"仅点击 #0 列切换"（避免误操作 + 更符合 Treeview 交互习惯）。
+- **🛠 日志区背景透明**。`Text` 控件 `bg` 改为与卡片的浅冷灰色（`#fbfcfe`）形成层次。
+
+### 🔧 重构
+
+- **`ui/widgets.py`**：完整重写 `ModernButton`（Canvas-based + PIL 圆角 + icon 参数 + 完整状态机），新增 `IconLibrary`（17 个原始图标 + 7 个新增配置图标 = 24 个）、`make_icon_label`（icon + text 横向布局辅助）、`StatCard`（KPI 卡片）、`StatusIndicator`（运行状态灯）。
+- **`ui/app.py`**：重写 `create_ui`（main 布局）、`create_toolbar`（inline 配置项）、`create_stats_row`、`_make_card`（Canvas 圆角卡片）、`_create_selection_images` / `_checkbox_glyph` / `_refresh_device_checkbox_images`（PIL 勾选框）。
+
+### 🧪 验证
+
+- 90 测试全过：50 pure + 28 refactor + 12 full verification（含 `test_select_all` / `test_deselect_all` / `test_invert` / `test_search_by_ip_substring` / `test_theme_toggle_twice_idempotent` / `test_theme_toggle_keeps_widgets_responsive`）
+- 配置加载流程 smoke test：100 台设备全部加载，状态栏最终显示"所有配置加载完成"
+- 图标渲染 smoke test：24 个 IconLibrary 图标全部成功渲染
+- 按钮 AA smoke test：8× 超采样后圆角边缘像素级平滑，无可见锯齿
+
+### 📦 升级说明
+
+- 配置文件（`config/*.csv` / `config/*.txt`）兼容，无需迁移
+- 设备列表 CSV 列顺序不变
+- 命令文件 `# @heavy` / `# @timeout N` 标记继续支持
+- **旧 exe 卸载即可**，新 exe 直接覆盖运行（不依赖注册表 / 用户配置目录）
+
+---
 
 ## 📋 v2.1.3 变更摘要
 
