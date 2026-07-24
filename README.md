@@ -40,7 +40,7 @@
 
 **v2.2.1 SHA256**：
 ```
-_将在 release 上传后填充（构建后生成）_  NetworkInspector-v2.2.1.exe
+dd0e4f1b2730fa884db28b186bcf50e5e1ccf7fd5c8bce416e752318f6a3a389  NetworkInspector-v2.2.1.exe
 ```
 
 > Windows：双击即用，无需安装。首次启动可能被 SmartScreen 拦截，点"更多信息 → 仍要运行"即可。  
