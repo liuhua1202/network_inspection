@@ -1,15 +1,15 @@
 # 网络设备巡检工具 · Network Device Inspector
 
-[[[Version](https://img.shields.io/badge/version-v2.2.1-0078d4?style=flat-square)](#-变更摘要)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4?style=flat-square)](#-特性)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square)](https://www.python.org/)
 [![Netmiko](https://img.shields.io/badge/netmiko-4.x-FF6F00?style=flat-square)](https://github.com/ktbyers/netmiko)
 [![Tkinter](https://img.shields.io/badge/tkinter-builtin-2C5E8E?style=flat-square)](#-技术栈)
+[[[Version](https://img.shields.io/badge/version-v2.2.1-0078d4?style=flat-square)](#-变更摘要)
 
 基于 Python + Tkinter 的网络设备批量巡检工具，支持 SSH / Telnet 协议、并发执行、结果导出 Excel、GBK / UTF-8 中文输出识别。
 
-<img width="1402" height="932" alt="a271109efdce0bda8d6b5611055a81dd" src="https://github.com/user-attachments/assets/89e9f7ec-017e-427b-90f0-a5883ae63049" />
+<img width="1352" height="912" alt="image" src="https://github.com/user-attachments/assets/d5df4d89-197f-47b4-8f55-b31de68e1ad9" />
 
 
 
