@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网络设备自动巡检工具 v2.2.1
+网络设备自动巡检工具 v2.2.2
 Network Device Inspection Tool
 
 启动入口：``python network_inspection.py``
@@ -35,6 +35,7 @@ from core.config import (
     load_device_types_config, validate_device_types_config,
     load_devices, validate_devices_config, validate_devices_config_with_details,
     parse_commands_file, validate_commands_config, validate_config_file,
+    ensure_config_dir,
 )
 from core.inspector import (
     NETMIKO_AVAILABLE, missing_netmiko_message,
@@ -71,6 +72,16 @@ def main():
     log_info(f"Python 版本：{sys.version}")
     log_info(f"运行路径：{os.getcwd()}")
     debug_log("日志系统初始化完成")
+
+    # 启动自举：若当前工作目录下缺少 config/，自动生成默认配置文件
+    try:
+        created = ensure_config_dir()
+        if created:
+            log_info(f"已自动生成默认配置文件（共 {len(created)} 项）：{created}")
+        else:
+            debug_log("配置文件已存在，无需生成")
+    except Exception as e:
+        log_warning(f"自动生成配置文件失败（程序将继续尝试加载）：{e}")
 
     try:
         root = Tk()

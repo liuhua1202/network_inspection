@@ -26,7 +26,7 @@ from core.config import (
     load_devices, load_device_types_config, parse_commands_file,
     validate_device_types_config, validate_devices_config,
     validate_devices_config_with_details, validate_commands_config,
-    validate_config_file, is_comment_line, _parse_selected,
+    validate_config_file, is_comment_line, _parse_selected, ensure_config_dir,
 )
 from core.encoding import detect_file_encoding
 from core.inspector import (
@@ -111,7 +111,7 @@ class ModernNetworkInspectionUI:
     def __init__(self, root):
         debug_log("初始化UI")
         self.root = root
-        self.root.title("网络设备自动巡检工具 v2.2.1 | Network Device Inspector")
+        self.root.title("网络设备自动巡检工具 v2.2.2 | Network Device Inspector")
 
         self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
@@ -281,7 +281,7 @@ class ModernNetworkInspectionUI:
               fg=theme_manager.get_color('FG_PRIMARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w')
         Label(inner_frame,
-              text="Network Device Inspector v2.2.1",
+              text="Network Device Inspector v2.2.2",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_SECONDARY'),
               bg=theme_manager.get_color('BG_SECONDARY')).pack(anchor='w', pady=(4, 0))
@@ -647,7 +647,7 @@ class ModernNetworkInspectionUI:
                                       bg=theme_manager.get_color('BG_CARD'))
         self.status_indicator.pack(side='right', padx=(8, 0))
 
-        Label(inner_frame, text="v2.2.1",
+        Label(inner_frame, text="v2.2.2",
               font=(FONT_FAMILY_UI, 10),
               fg=theme_manager.get_color('FG_MUTED'),
               bg=theme_manager.get_color('BG_CARD')).pack(side='right', padx=(8, 0))
@@ -708,6 +708,11 @@ class ModernNetworkInspectionUI:
 
     def auto_load_default_configs(self):
         """Worker 线程：加载设备类型 + 设备列表 + 命令关联。"""
+        # 兜底自举：确保当前工作目录下 config/ 及默认配置存在
+        try:
+            ensure_config_dir()
+        except Exception:
+            pass
         device_types_file = _default_device_types_file()
         devices_file = _default_devices_file()
 
@@ -1158,7 +1163,7 @@ class ModernNetworkInspectionUI:
 • 设备列表中可通过上下箭头键选择设备""")
 
     def show_about(self):
-        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.2.1
+        messagebox.showinfo("关于软件", """网络设备自动巡检工具 v2.2.2
 
 主要功能：
 • 支持多厂商设备（华为、思科、H3C、Juniper 等）

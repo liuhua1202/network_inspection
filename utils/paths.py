@@ -23,9 +23,14 @@ def _project_root():
 # 项目根
 PROJECT_ROOT = _project_root()
 
-# 配置目录：放 devices.csv / device_types.csv / commands/
-CONFIG_DIR = os.path.join(PROJECT_ROOT, 'config')
+# 运行期配置目录：放在「当前工作目录」下，便于把配置与程序放在一起，
+# 也保证打包后的 exe 在任意目录双击运行时都能开箱即用（见 core.config.ensure_config_dir）。
+# 注意：PROJECT_ROOT/config 仅作为「模板源」，用于首次运行时补齐缺失的配置文件。
+CONFIG_DIR = os.path.join(os.getcwd(), 'config')
 COMMANDS_DIR = os.path.join(CONFIG_DIR, 'commands')
+
+# 模板配置目录（源码 = 项目根/config；PyInstaller 单文件 = 解压目录/config）
+TEMPLATE_CONFIG_DIR = os.path.join(PROJECT_ROOT, 'config')
 
 # 巡检日志目录
 LOG_DIR_NAME = "InspectionLogs"

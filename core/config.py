@@ -11,6 +11,7 @@ import os
 from utils.logging_setup import LOG_QUEUE, log_info, debug_log
 from utils.validation import validate_ip, validate_port
 from core.encoding import detect_file_encoding
+from utils.paths import CONFIG_DIR, TEMPLATE_CONFIG_DIR
 
 
 # ==================== 通用解析工具 ====================
@@ -445,3 +446,48 @@ def validate_config_file(file_path, required_columns):
         return len(errors) == 0, errors
     except Exception as e:
         return False, [f"文件读取错误: {e}"]
+
+
+# ==================== 首次运行配置自举 ====================
+
+def ensure_config_dir(config_dir=None, template_dir=None):
+    """确保运行期配置目录存在，缺失的配置文件从「模板目录」补齐。
+
+    用于程序启动自举：当用户在没有任何配置文件的目录（例如直接把 exe
+    拷到新文件夹双击运行）启动时，自动在当前工作目录下生成 ``config/``
+    及 ``device_types.*`` / ``devices.*`` / ``commands/*.txt`` 等文件，
+    保证开箱即用。已存在的文件不会被覆盖，仅补齐缺失项。
+
+    - ``config_dir``：目标配置目录，默认 ``utils.paths.CONFIG_DIR``
+      （当前工作目录/config）。
+    - ``template_dir``：模板源目录，默认 ``utils.paths.TEMPLATE_CONFIG_DIR``
+      （源码 = 项目根/config；exe = 解压目录/config）。
+
+    返回被创建的文件/目录路径列表（已存在则不写、不返回）。
+    """
+    import shutil
+
+    if config_dir is None:
+        config_dir = CONFIG_DIR
+    if template_dir is None:
+        template_dir = TEMPLATE_CONFIG_DIR
+
+    created = []
+    if not os.path.isdir(config_dir):
+        os.makedirs(config_dir, exist_ok=True)
+        created.append(config_dir)
+
+    if os.path.isdir(template_dir):
+        for root, _dirs, files in os.walk(template_dir):
+            rel_root = os.path.relpath(root, template_dir)
+            for fn in files:
+                src = os.path.join(root, fn)
+                if rel_root == '.':
+                    dst = os.path.join(config_dir, fn)
+                else:
+                    dst = os.path.join(config_dir, rel_root, fn)
+                if not os.path.exists(dst):
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                    created.append(dst)
+    return created
