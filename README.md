@@ -40,7 +40,7 @@
 
 **v2.2.2 SHA256**：
 ```
-__V2_2_2_SHA256_PLACEHOLDER__
+c6e8c0972ba21f61dc1ed5628bc8a6f138207a5225307cf21baba8e396c932df  NetworkInspector-v2.2.2.exe
 ```
 
 > Windows：双击即用，无需安装。首次启动可能被 SmartScreen 拦截，点"更多信息 → 仍要运行"即可。  
